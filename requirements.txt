@@ -1,0 +1,6 @@
+scrapling[all]
+google-genai
+python-dotenv
+colorama
+plyer
+patchright
