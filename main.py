@@ -14,17 +14,27 @@ import random
 import subprocess
 from datetime import datetime
 
+# Fix Windows console encoding for emoji/unicode characters
+if sys.platform == 'win32':
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+
 from colorama import init as colorama_init, Fore, Style
 
 from config import config
 from db import (
     init_db, is_job_seen, mark_job_seen, save_lead, get_stats,
     start_run, complete_run, fail_run,
-    save_scraped_job, update_job_ai_status, cleanup_old_data
+    save_scraped_job, update_job_ai_status, cleanup_old_data,
+    save_outreach_result, update_outreach_status, get_setting,
 )
-from scraper import scrape_all_jobs, close_browser
+from scraper import scrape_all_jobs, close_browser, start_browser
 from analyzer import analyze_job
 from notifier import notify_desktop, log_lead_to_file, print_lead
+from grok_searcher import search_contacts_via_grok
+from contact_extractor import extract_contacts
+from outreach_mailer import should_skip_job, generate_email_draft, send_via_webhook
 
 colorama_init()
 
@@ -44,6 +54,116 @@ def print_banner():
     print(f"{Style.DIM}  Polling every {config['poll_interval_minutes']} min | {len(config['search_urls'])} search URL(s) | Recent jobs only{Style.RESET_ALL}")
     print(f"{Style.DIM}  Dashboard: python3 dashboard.py → http://localhost:5050{Style.RESET_ALL}")
     print(f"{Style.DIM}  Press Ctrl+C to stop\n{Style.RESET_ALL}")
+
+
+# ── Outreach pipeline ────────────────────────────────────────────────
+
+def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
+    """
+    Run the full outreach pipeline for a discovered lead:
+    1. Search contacts via Grok
+    2. Extract contacts via Gemini
+    3. Filter job suitability
+    4. Generate email draft
+    5. Send via n8n webhook
+    """
+    print(f"\n{Fore.CYAN}{Style.BRIGHT}  ══ Outreach Pipeline ══{Style.RESET_ALL}")
+
+    # Step 0: Check if job should be skipped
+    skip, skip_reason = should_skip_job(job)
+    if skip:
+        print(f"{Fore.YELLOW}  ⏭ Skipping outreach: {skip_reason}{Style.RESET_ALL}")
+        save_outreach_result(
+            lead_id=lead_db_id,
+            send_status='skipped',
+            skipped_reason=skip_reason,
+        )
+        return
+
+    # Build a summary from the lead data for Grok
+    ci = lead_result.get('client_info', {})
+    cs = lead_result.get('contact_strategy', {})
+    lead_summary = (
+        f"Job Title: {job.get('title', '')}\n"
+        f"Budget: {job.get('budget', 'Not specified')}\n"
+        f"Skills: {job.get('skills', '')}\n"
+        f"Company: {ci.get('company_name', 'Unknown')}\n"
+        f"Person: {ci.get('guessed_person', 'Unknown')}\n"
+        f"Website: {ci.get('website', '')}\n"
+        f"Search Query: {ci.get('search_query_used', '')}\n"
+        f"Description: {job.get('description', '')[:500]}\n"
+    )
+
+    # Step 1: Grok search
+    print(f"{Fore.CYAN}  Step 1/4: Searching contacts via Grok...{Style.RESET_ALL}")
+    grok_response = search_contacts_via_grok(page, lead_summary)
+
+    if not grok_response:
+        print(f"{Fore.YELLOW}  ⚠ No Grok response — saving partial result{Style.RESET_ALL}")
+        save_outreach_result(
+            lead_id=lead_db_id,
+            grok_response='',
+            send_status='grok_failed',
+        )
+        return
+
+    # Step 2: Extract contacts
+    print(f"{Fore.CYAN}  Step 2/4: Extracting contacts via Gemini...{Style.RESET_ALL}")
+    contacts = extract_contacts(grok_response)
+
+    if not contacts.get('emails'):
+        print(f"{Fore.YELLOW}  ⚠ No email contacts found — saving result{Style.RESET_ALL}")
+        save_outreach_result(
+            lead_id=lead_db_id,
+            grok_response=grok_response,
+            contacts=contacts,
+            send_status='no_emails',
+        )
+        return
+
+    # Step 3: Generate email draft
+    print(f"{Fore.CYAN}  Step 3/4: Generating email draft...{Style.RESET_ALL}")
+    email_data = generate_email_draft(job, contacts)
+
+    if email_data.get('error') and not email_data.get('subject'):
+        print(f"{Fore.YELLOW}  ⚠ Email draft failed: {email_data['error']}{Style.RESET_ALL}")
+        save_outreach_result(
+            lead_id=lead_db_id,
+            grok_response=grok_response,
+            contacts=contacts,
+            send_status='draft_failed',
+        )
+        return
+
+    # Step 4: Send via webhook
+    webhook_url = get_setting('n8n_webhook_url', '')
+    print(f"{Fore.CYAN}  Step 4/4: Sending emails via n8n webhook...{Style.RESET_ALL}")
+    send_results = send_via_webhook(webhook_url, email_data)
+
+    # Determine overall status
+    sent_count = sum(1 for r in send_results if r['status'] == 'sent')
+    total = len(send_results)
+    if sent_count == total and total > 0:
+        status = 'sent'
+    elif sent_count > 0:
+        status = 'partial'
+    elif any(r['status'] == 'no_webhook' for r in send_results):
+        status = 'no_webhook'
+    else:
+        status = 'send_failed'
+
+    # Save complete outreach result
+    save_outreach_result(
+        lead_id=lead_db_id,
+        grok_response=grok_response,
+        contacts=contacts,
+        email_subject=email_data.get('subject', ''),
+        email_body=email_data.get('body', ''),
+        emails_sent_to=send_results,
+        send_status=status,
+    )
+
+    print(f"{Fore.GREEN}{Style.BRIGHT}  ✓ Outreach complete: {sent_count}/{total} emails sent{Style.RESET_ALL}")
 
 
 # ── Main poll cycle ──────────────────────────────────────────────────
@@ -111,12 +231,19 @@ def run_poll_cycle(cycle_number: int):
         if result.get('status') == 'LEAD_FOUND':
             leads_found += 1
             print_lead(result, job)
-            save_lead(job['job_url'], job['title'], result)
+            lead_db_id = save_lead(job['job_url'], job['title'], result)
             log_lead_to_file(result, job)
             update_job_ai_status(job_db_id, 'lead_found', result)
 
             if config['enable_notifications']:
                 notify_desktop(result, job['title'])
+
+            # Run outreach pipeline
+            try:
+                page = start_browser(headless=config['headless'])
+                run_outreach_pipeline(page, job, result, lead_db_id)
+            except Exception as oe:
+                print(f"{Fore.YELLOW}  ⚠ Outreach pipeline error: {oe}{Style.RESET_ALL}")
         elif result.get('status') == 'NO_LEAD':
             reason = result.get('reason', '')
             reason_str = f" ({reason})" if reason else ""

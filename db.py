@@ -61,6 +61,25 @@ def init_db():
             leads_found  INTEGER DEFAULT 0,
             error_msg    TEXT DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS outreach_results (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id         INTEGER,
+            grok_response   TEXT DEFAULT '',
+            contacts_json   TEXT DEFAULT '{}',
+            email_subject   TEXT DEFAULT '',
+            email_body      TEXT DEFAULT '',
+            emails_sent_to  TEXT DEFAULT '[]',
+            send_status     TEXT DEFAULT 'pending',
+            skipped_reason  TEXT DEFAULT '',
+            created_at      TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (lead_id) REFERENCES leads(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT DEFAULT ''
+        );
     """)
     _conn.commit()
     return _conn
@@ -112,14 +131,15 @@ def mark_job_seen(job_url: str, title: str):
     _conn.commit()
 
 
-def save_lead(job_url: str, job_title: str, payload: dict):
-    """Save a discovered lead to the database."""
+def save_lead(job_url: str, job_title: str, payload: dict) -> int:
+    """Save a discovered lead to the database. Returns the lead row ID."""
     url_hash = _hash_url(job_url)
-    _conn.execute(
+    cur = _conn.execute(
         'INSERT INTO leads (url_hash, job_title, job_url, payload) VALUES (?, ?, ?, ?)',
         (url_hash, job_title, job_url, json.dumps(payload))
     )
     _conn.commit()
+    return cur.lastrowid
 
 
 def get_recent_leads(limit: int = 20) -> list:
@@ -244,3 +264,98 @@ def get_dashboard_data() -> dict:
             'total_errors': total_errors,
         },
     }
+
+
+# ── Outreach tracking ────────────────────────────────────────────────
+
+def save_outreach_result(
+    lead_id: int,
+    grok_response: str = '',
+    contacts: dict = None,
+    email_subject: str = '',
+    email_body: str = '',
+    emails_sent_to: list = None,
+    send_status: str = 'pending',
+    skipped_reason: str = '',
+) -> int:
+    """Save an outreach result for a lead. Returns the row ID."""
+    cur = _conn.execute(
+        '''INSERT INTO outreach_results
+           (lead_id, grok_response, contacts_json, email_subject,
+            email_body, emails_sent_to, send_status, skipped_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+        (
+            lead_id,
+            grok_response,
+            json.dumps(contacts or {}),
+            email_subject,
+            email_body,
+            json.dumps(emails_sent_to or []),
+            send_status,
+            skipped_reason,
+        )
+    )
+    _conn.commit()
+    return cur.lastrowid
+
+
+def update_outreach_status(outreach_id: int, send_status: str, emails_sent_to: list = None):
+    """Update the send status of an outreach result."""
+    if emails_sent_to is not None:
+        _conn.execute(
+            'UPDATE outreach_results SET send_status=?, emails_sent_to=? WHERE id=?',
+            (send_status, json.dumps(emails_sent_to), outreach_id)
+        )
+    else:
+        _conn.execute(
+            'UPDATE outreach_results SET send_status=? WHERE id=?',
+            (send_status, outreach_id)
+        )
+    _conn.commit()
+
+
+def get_outreach_for_lead(lead_id: int) -> dict:
+    """Get outreach result for a specific lead."""
+    row = _conn.execute(
+        'SELECT * FROM outreach_results WHERE lead_id = ? ORDER BY id DESC LIMIT 1',
+        (lead_id,)
+    ).fetchone()
+    if row:
+        result = dict(row)
+        result['contacts_json'] = json.loads(result.get('contacts_json', '{}'))
+        result['emails_sent_to'] = json.loads(result.get('emails_sent_to', '[]'))
+        return result
+    return None
+
+
+def get_all_outreach_results() -> list:
+    """Get all outreach results."""
+    rows = _conn.execute(
+        'SELECT * FROM outreach_results ORDER BY created_at DESC LIMIT 50'
+    ).fetchall()
+    results = []
+    for row in rows:
+        r = dict(row)
+        r['contacts_json'] = json.loads(r.get('contacts_json', '{}'))
+        r['emails_sent_to'] = json.loads(r.get('emails_sent_to', '[]'))
+        results.append(r)
+    return results
+
+
+# ── Settings ─────────────────────────────────────────────────────────
+
+def save_setting(key: str, value: str):
+    """Save a setting to the database."""
+    _conn.execute(
+        'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+        (key, value)
+    )
+    _conn.commit()
+
+
+def get_setting(key: str, default: str = '') -> str:
+    """Get a setting from the database."""
+    row = _conn.execute(
+        'SELECT value FROM settings WHERE key = ?', (key,)
+    ).fetchone()
+    return row['value'] if row else default

@@ -93,7 +93,7 @@ Respond with ONLY the JSON as instructed."""
             contents=SYSTEM_PROMPT + '\n\n' + prompt,
             config=types.GenerateContentConfig(
                 temperature=0.2,
-                max_output_tokens=1024,
+                max_output_tokens=2048,
             ),
         )
 
@@ -113,5 +113,5 @@ Respond with ONLY the JSON as instructed."""
 
     except Exception as e:
         title_preview = job.get('title', '')[:40]
-        print(f"{Fore.YELLOW}  ⚠ Analyzer error for \"{title_preview}...\": {e}{Style.RESET_ALL}")
-        return {'status': 'NO_LEAD'}
+        print(f"{Fore.YELLOW}  [!] Analyzer error for \"{title_preview}...\": {e}{Style.RESET_ALL}")
+        return {'status': 'ERROR', 'error': str(e)}
