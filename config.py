@@ -16,6 +16,7 @@ config = {
     'gemini_api_key': os.getenv('GEMINI_API_KEY', ''),
 
     'poll_interval_minutes': int(os.getenv('POLL_INTERVAL_MINUTES', '15')),
+    'ai_call_delay_seconds': int(os.getenv('AI_CALL_DELAY_SECONDS', '60')),
 
     'search_urls': [
         u.strip() for u in os.getenv('UPWORK_SEARCH_URLS', '').split(',')
@@ -24,7 +25,18 @@ config = {
 
     'enable_notifications': os.getenv('ENABLE_NOTIFICATIONS', 'true').lower() != 'false',
 
+    # Browser mode for Gemini/login flows. Set HEADLESS=true for fully headless
+    # runs, or keep false when using a visible browser / virtual display.
     'headless': os.getenv('HEADLESS', 'false').lower() == 'true',
+
+    # Gmail API — address used as the From: header when sending outreach emails.
+    # Set this to your Gmail address in .env as GMAIL_SENDER=you@gmail.com
+    # Leave blank to use 'me' (Gmail API resolves the authorized account automatically).
+    'gmail_sender': os.getenv('GMAIL_SENDER', 'me'),
+
+    # Prane / outbound_live email API
+    'prane_base_url': os.getenv('PRANE_BASE_URL', 'https://prane.one').rstrip('/'),
+    'prane_api_key': os.getenv('PRANE_API_KEY', os.getenv('OUTBOUND_LIVE_API_KEY', '')),
 }
 
 # Fallback search URLs if none configured

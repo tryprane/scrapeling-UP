@@ -7,7 +7,7 @@ an upwork job scraper that polls search results, analyzes them with gemini ai, a
 ## what it does
 
 - polls upwork search urls every N minutes (configurable)
-- scrapes job titles, budgets, skills, and full descriptions using patchright (playwright with stealth)
+- scrapes job titles, budgets, skills, and full descriptions using Scrapling
 - passes each job to gemini ai for analysis — it decides if it's a real lead or not
 - shows results on a live dashboard at `http://localhost:5050`
 - sends desktop notifications when a lead is found
@@ -184,6 +184,13 @@ by default the dashboard binds to `localhost:5050`. to access it from your brows
 
 ## notes
 
-- the scraper uses a persistent browser profile stored at `~/.cliup-browser-profile-py`. if upwork asks you to log in on the first run, do it once and the session is saved.
+- Gemini browser login uses a persistent browser profile stored at `~/.cliup-browser-profile-py`. If Gemini asks you to log in on the first run, do it once and the session is saved.
+- Upwork scraping now runs through Scrapling instead of the persistent browser profile.
 - gemini api calls are spaced 60 seconds apart to stay within free tier rate limits.
 - the sqlite database (`leads.db`) is created automatically on first run.
+
+## VPS note
+
+- On a Ubuntu VPS, run the workflow inside a virtual display if you want to log into Google/Gemini manually at least once.
+- A common pattern is `xvfb-run -a python3 main.py`.
+- Set `HEADLESS=false` if you want the browser UI/login flow to stay available.
