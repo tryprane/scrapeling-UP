@@ -1,39 +1,59 @@
 """
-Outreach Mailer — Generates email drafts and sends via n8n webhook.
+Outreach Mailer — Generates email drafts and sends via Gmail API.
 
 Handles:
-1. Job filtering (skips WordPress, highly senior positions, etc.)
+1. Job filtering with conservative skip rules
 2. Email draft generation using Gemini AI (as Saimands Roy from Femur Studio)
-3. Sending emails individually via n8n webhook
+3. Sending emails individually via Gmail API (Google Cloud)
+
+Gmail API Setup:
+  1. Enable Gmail API in Google Cloud Console
+  2. Create OAuth2 credentials (Desktop app) → download credentials.json
+  3. Place credentials.json in the same directory as this file
+  4. On first run a browser window opens for one-time authorization
+  5. token.json is saved automatically for subsequent runs
 
 Can be tested standalone:
     python -c "from outreach_mailer import should_skip_job; print(should_skip_job({'title':'WordPress Developer','skills':'WordPress'}))"
 """
 
 import json
-import requests
+import os
+import base64
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
 from google import genai
 from google.genai import types
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 from colorama import Fore, Style
 
 from config import config
 
-_client = None
+_genai_client = None
+_gmail_service = None
+
+# ── Gmail API OAuth scopes ────────────────────────────────────────────
+
+GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.send']
+
+# Paths for OAuth token / credentials files (same folder as this script)
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CREDENTIALS_FILE = os.path.join(_BASE_DIR, 'credentials.json')
+TOKEN_FILE       = os.path.join(_BASE_DIR, 'token.json')
 
 # ── Job filter keywords ──────────────────────────────────────────────
 
-SKIP_TITLE_KEYWORDS = [
-    'wordpress', 'wp developer', 'wp expert',
-    'senior developer', 'staff engineer', 'principal engineer',
-    'lead developer', 'lead engineer', 'architect',
-    'vp of engineering', 'cto', 'director of engineering',
-    'devops engineer', 'sre ', 'site reliability',
-]
+SKIP_TITLE_KEYWORDS = []
 
-SKIP_SKILL_KEYWORDS = [
-    'wordpress', 'wp', 'elementor', 'woocommerce', 'divi',
-    'shopify liquid',
-]
+SKIP_SKILL_KEYWORDS = []
+
+# Never skip WordPress leads. We want to keep these available for review
+# because real client opportunities often come through WordPress posts.
+NEVER_SKIP_KEYWORDS = ['wordpress']
 
 # ── Email generation prompt ──────────────────────────────────────────
 
@@ -57,17 +77,56 @@ OUTPUT ONLY THIS JSON, NOTHING ELSE:
 CRITICAL: Output ONLY valid JSON. No markdown, no code fences."""
 
 
-def _get_client():
+def _get_genai_client():
     """Get or create the Gemini client instance."""
-    global _client
-    if _client:
-        return _client
+    global _genai_client
+    if _genai_client:
+        return _genai_client
 
     if not config['gemini_api_key']:
         raise RuntimeError('GEMINI_API_KEY is not set — cannot generate emails.')
 
-    _client = genai.Client(api_key=config['gemini_api_key'])
-    return _client
+    _genai_client = genai.Client(api_key=config['gemini_api_key'])
+    return _genai_client
+
+
+def _get_gmail_service():
+    """
+    Get or create an authorized Gmail API service.
+
+    Uses OAuth2 credentials.json (Desktop app type) from Google Cloud Console.
+    Saves the refresh token to token.json for reuse.
+    """
+    global _gmail_service
+    if _gmail_service:
+        return _gmail_service
+
+    if not os.path.exists(CREDENTIALS_FILE):
+        raise FileNotFoundError(
+            f'credentials.json not found at {CREDENTIALS_FILE}\n'
+            'Please download OAuth2 credentials from Google Cloud Console and place them there.\n'
+            'See the Gmail API Setup guide.'
+        )
+
+    creds = None
+
+    # Load existing token
+    if os.path.exists(TOKEN_FILE):
+        creds = Credentials.from_authorized_user_file(TOKEN_FILE, GMAIL_SCOPES)
+
+    # Refresh or re-authorize if needed
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, GMAIL_SCOPES)
+            creds = flow.run_local_server(port=0)
+        # Save for next run
+        with open(TOKEN_FILE, 'w') as f:
+            f.write(creds.to_json())
+
+    _gmail_service = build('gmail', 'v1', credentials=creds)
+    return _gmail_service
 
 
 def should_skip_job(job: dict) -> tuple:
@@ -82,6 +141,10 @@ def should_skip_job(job: dict) -> tuple:
     """
     title = (job.get('title', '') or '').lower()
     skills = (job.get('skills', '') or '').lower()
+
+    for kw in NEVER_SKIP_KEYWORDS:
+        if kw in title or kw in skills:
+            return (False, '')
 
     # Check title keywords
     for kw in SKIP_TITLE_KEYWORDS:
@@ -121,7 +184,7 @@ def generate_email_draft(job: dict, contacts: dict) -> dict:
             'error': 'No email addresses found in contacts',
         }
 
-    client = _get_client()
+    client = _get_genai_client()
 
     prompt = f"""Generate a cold outreach email for this job:
 
@@ -139,7 +202,7 @@ Respond with ONLY the JSON as instructed."""
             contents=EMAIL_PROMPT + '\n\n' + prompt,
             config=types.GenerateContentConfig(
                 temperature=0.4,
-                max_output_tokens=1024,
+                response_mime_type="application/json",
             ),
         )
 
@@ -163,13 +226,13 @@ Respond with ONLY the JSON as instructed."""
             'error': '',
         }
 
-        print(f"{Fore.GREEN}  ✓ Email draft generated: \"{result['subject']}\"{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}  + Email draft generated: \"{result['subject']}\"{Style.RESET_ALL}")
         print(f"{Style.DIM}    To: {', '.join(emails)}{Style.RESET_ALL}")
 
         return result
 
     except Exception as e:
-        print(f"{Fore.RED}  ✗ Email draft generation error: {e}{Style.RESET_ALL}")
+        print(f"{Fore.RED}  - Email draft generation error: {e}{Style.RESET_ALL}")
         return {
             'subject': '',
             'body': '',
@@ -178,73 +241,58 @@ Respond with ONLY the JSON as instructed."""
         }
 
 
-def send_via_webhook(webhook_url: str, email_data: dict) -> list:
+def send_via_gmail(email_data: dict, sender_email: str = None) -> list:
     """
-    Send emails individually via n8n webhook.
+    Send emails individually via Gmail API.
 
-    Each email is sent as a separate POST request to the webhook.
+    Each recipient gets a separate email.
 
     Args:
-        webhook_url: The n8n webhook URL
         email_data: Dict with 'subject', 'body', 'to_emails'
+        sender_email: The Gmail address to send from (defaults to config value).
+                      Use 'me' to let Gmail resolve from the authorized account.
 
     Returns:
         List of dicts: [{'email': str, 'status': 'sent'|'failed', 'error': str}]
     """
-    if not webhook_url:
-        print(f"{Fore.YELLOW}  ⚠ No webhook URL configured — skipping email send{Style.RESET_ALL}")
-        return [{'email': e, 'status': 'no_webhook', 'error': 'Webhook URL not configured'}
-                for e in email_data.get('to_emails', [])]
-
     results = []
     subject = email_data.get('subject', '')
-    body = email_data.get('body', '')
-    emails = email_data.get('to_emails', [])
+    body    = email_data.get('body', '')
+    emails  = email_data.get('to_emails', [])
 
     if not emails:
         return []
 
+    # sender_email can be 'me' (Gmail resolves it) or an explicit address
+    from_addr = sender_email or config.get('gmail_sender', 'me')
+
+    try:
+        service = _get_gmail_service()
+    except Exception as e:
+        print(f"{Fore.RED}  - Gmail service error: {e}{Style.RESET_ALL}")
+        return [{'email': e_addr, 'status': 'failed', 'error': str(e)} for e_addr in emails]
+
     for email_addr in emails:
-        payload = {
-            'to': email_addr,
-            'subject': subject,
-            'body': body,
-            'from_name': 'Saimands Roy',
-            'from_company': 'Femur Studio',
-        }
-
         try:
-            print(f"{Style.DIM}  📧 Sending email to {email_addr}...{Style.RESET_ALL}")
-            resp = requests.post(
-                webhook_url,
-                json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=30,
-            )
+            print(f"{Style.DIM}  > Sending email to {email_addr} via Gmail...{Style.RESET_ALL}")
 
-            if resp.status_code in (200, 201, 202):
-                print(f"{Fore.GREEN}  ✓ Email sent to {email_addr}{Style.RESET_ALL}")
-                results.append({
-                    'email': email_addr,
-                    'status': 'sent',
-                    'error': '',
-                })
-            else:
-                error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                print(f"{Fore.RED}  ✗ Failed to send to {email_addr}: {error}{Style.RESET_ALL}")
-                results.append({
-                    'email': email_addr,
-                    'status': 'failed',
-                    'error': error,
-                })
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From']    = from_addr
+            msg['To']      = email_addr
+            msg.attach(MIMEText(body, 'plain'))
+
+            raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+            send_body = {'raw': raw}
+
+            service.users().messages().send(userId='me', body=send_body).execute()
+
+            print(f"{Fore.GREEN}  + Email sent to {email_addr}{Style.RESET_ALL}")
+            results.append({'email': email_addr, 'status': 'sent', 'error': ''})
 
         except Exception as e:
-            print(f"{Fore.RED}  ✗ Webhook error for {email_addr}: {e}{Style.RESET_ALL}")
-            results.append({
-                'email': email_addr,
-                'status': 'failed',
-                'error': str(e),
-            })
+            print(f"{Fore.RED}  - Gmail send error for {email_addr}: {e}{Style.RESET_ALL}")
+            results.append({'email': email_addr, 'status': 'failed', 'error': str(e)})
 
     return results
 
