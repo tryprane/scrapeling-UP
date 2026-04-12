@@ -4,6 +4,8 @@ Auto-started by main.py, also runnable standalone.
 
 Usage:  python3 dashboard.py
 Opens:  http://localhost:5050
+
+Email delivery is handled via Gmail API (see outreach_mailer.py).
 """
 
 import json
@@ -78,20 +80,16 @@ def get_dashboard_json():
         total_pending = conn.execute("SELECT COUNT(*) as c FROM scraped_jobs WHERE ai_status='pending'").fetchone()['c']
         total_skipped = conn.execute("SELECT COUNT(*) as c FROM scraped_jobs WHERE ai_status='skipped'").fetchone()['c']
 
-        recent_leads = conn.execute('SELECT * FROM leads ORDER BY created_at DESC LIMIT 20').fetchall()
+        recent_leads = conn.execute('SELECT * FROM leads ORDER BY created_at DESC LIMIT 200').fetchall()
 
         # Outreach data
-        outreach_results = conn.execute('SELECT * FROM outreach_results ORDER BY created_at DESC LIMIT 50').fetchall()
+        outreach_results = conn.execute('SELECT * FROM outreach_results ORDER BY created_at DESC LIMIT 200').fetchall()
         total_emails_sent = conn.execute(
             "SELECT COUNT(*) as c FROM outreach_results WHERE send_status='sent' OR send_status='partial'"
         ).fetchone()['c']
         total_outreach_skipped = conn.execute(
             "SELECT COUNT(*) as c FROM outreach_results WHERE send_status='skipped'"
         ).fetchone()['c']
-
-        # Webhook URL
-        webhook_row = conn.execute("SELECT value FROM settings WHERE key='n8n_webhook_url'").fetchone()
-        webhook_url = webhook_row['value'] if webhook_row else ''
 
         # Build outreach map by lead_id
         outreach_map = {}
@@ -109,7 +107,6 @@ def get_dashboard_json():
             'recent_jobs': [{**dict(j), 'ai_result': json.loads(j['ai_result'] or '{}')} for j in recent_jobs],
             'recent_leads': [{**dict(r), 'payload': json.loads(r['payload'] or '{}')} for r in recent_leads],
             'outreach_map': outreach_map,
-            'webhook_url': webhook_url,
             'stats': {
                 'total_seen': total_seen, 'total_leads': total_leads,
                 'total_scraped': total_scraped, 'total_leads_found': total_leads_found,
@@ -159,18 +156,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opa
 .live-dot{width:6px;height:6px;border-radius:50%;background:#fff;animation:blink 2s ease-in-out infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.2}}
 
-/* Webhook bar */
-.webhook-bar{display:flex;align-items:center;gap:12px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px 18px;margin-bottom:20px;flex-wrap:wrap}
-.webhook-bar .wh-label{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1.5px;font-weight:700;font-family:'JetBrains Mono',monospace;white-space:nowrap}
-.webhook-bar input{flex:1;min-width:200px;background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:8px;padding:8px 14px;color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;outline:none;transition:border-color .2s}
-.webhook-bar input:focus{border-color:var(--border-bright)}
-.webhook-bar input::placeholder{color:var(--text-muted)}
-.btn-connect{padding:8px 20px;border-radius:100px;border:1px solid var(--green-border);background:transparent;color:var(--green);font-size:10px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap;letter-spacing:1px;text-transform:uppercase;font-family:'JetBrains Mono',monospace}
-.btn-connect:hover{background:rgba(34,197,94,1);color:#000;border-color:rgba(34,197,94,1)}
-.btn-connect.connected{background:var(--green-bg);border-color:var(--green-border);color:var(--green)}
-.wh-status{font-size:10px;font-family:'JetBrains Mono',monospace;letter-spacing:1px}
-.wh-status.ok{color:var(--green)}
-.wh-status.none{color:var(--text-muted)}
+/* Gmail badge */
+.gmail-badge{display:inline-flex;align-items:center;gap:8px;padding:6px 16px;border-radius:100px;border:1px solid var(--green-border);font-size:10px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;font-family:'JetBrains Mono',monospace;color:var(--green);margin-bottom:20px}
 
 /* Stats */
 .stats-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:12px;margin-bottom:24px}
@@ -247,7 +234,11 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opa
 .os-sent{border-color:var(--green-border);color:var(--green);background:var(--green-bg)}
 .os-partial{border-color:var(--orange-border);color:var(--orange);background:var(--orange-bg)}
 .os-pending,.os-no_webhook{border-color:var(--blue-border);color:var(--blue);background:var(--blue-bg)}
-.os-skipped,.os-grok_failed,.os-no_emails,.os-draft_failed,.os-send_failed{border-color:var(--text-muted);color:var(--text-muted);background:transparent}
+.os-skipped,.os-grok_failed,.os-no_emails,.os-no_verified_emails,.os-draft_failed,.os-send_failed{border-color:var(--text-muted);color:var(--text-muted);background:transparent}
+.grok-box{margin-top:12px;font-size:11px}
+.grok-box summary{cursor:pointer;color:var(--text-secondary);font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:1px;font-weight:700;margin-bottom:8px;user-select:none;transition:color .15s}
+.grok-box summary:hover{color:#fff}
+.grok-content{padding:12px;background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:6px;color:var(--text-muted);white-space:pre-wrap;line-height:1.6;max-height:200px;overflow-y:auto;font-family:'JetBrains Mono',monospace;font-size:10px}
 .contact-badges{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 .contact-badge{display:inline-flex;align-items:center;gap:5px;padding:4px 12px;border-radius:100px;font-size:10px;font-weight:600;font-family:'JetBrains Mono',monospace;border:1px solid var(--border);color:var(--text-secondary);background:var(--card)}
 .contact-badge.email{border-color:var(--green-border);color:var(--green)}
@@ -309,7 +300,6 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opa
   .stats-grid{grid-template-columns:repeat(2,1fr);gap:8px}
   .stat-card{padding:14px}
   .stat-card .value{font-size:22px}
-  .webhook-bar{flex-direction:column;align-items:stretch;gap:8px}
 
   /* Table → Cards on mobile */
   .jobs-table thead{display:none}
@@ -348,13 +338,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opa
     </div>
   </div>
 
-  <!-- Webhook Connection Bar -->
-  <div class="webhook-bar">
-    <span class="wh-label">n8n Webhook</span>
-    <input type="text" id="webhook-input" placeholder="https://your-n8n-instance.com/webhook/..." />
-    <button class="btn-connect" id="webhook-btn" onclick="connectWebhook()">Connect</button>
-    <span class="wh-status none" id="webhook-status">Not Connected</span>
-  </div>
+  <!-- Gmail API Badge -->
+  <div class="gmail-badge">&#9993; Gmail API</div>
 
   <div class="stats-grid" id="stats-grid"></div>
   <div class="run-banner" id="run-banner"></div>
@@ -397,7 +382,11 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opa
 </div>
 
 <script>
-const API='/api/data';
+const BASE_PATH = window.location.pathname.startsWith('/upwork') ? '/upwork' : '';
+const API = BASE_PATH + '/api/data';
+const API_LEAD_OUTREACH = BASE_PATH + '/api/lead/outreach';
+const API_LEAD_DELETE = BASE_PATH + '/api/lead/delete';
+const API_DELETE_ALL = BASE_PATH + '/api/delete-all';
 let allJobs=[];
 let showAllJobs=false;
 let showAllLeads=false;
@@ -410,21 +399,9 @@ function fmtTime(t){if(!t)return'\u2014';try{const d=new Date(t+'Z');return d.to
 function fmtDT(t){if(!t)return'\u2014';try{const d=new Date(t+'Z');return d.toLocaleDateString([],{month:'short',day:'numeric'})+' '+d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}catch{return t}}
 
 const AI_LABELS={'lead_found':'\u25cf LEAD','no_lead':'\u2014 No Lead','error':'! Error','pending':'... Pending','skipped':'x Skipped','analyzing':'~ Analyzing'};
-const OS_LABELS={'sent':'\u2713 Sent','partial':'\u26a0 Partial','pending':'... Pending','no_webhook':'! No Webhook','skipped':'\u23ed Skipped','grok_failed':'! Grok Failed','no_emails':'\u2014 No Emails','draft_failed':'! Draft Failed','send_failed':'! Send Failed'};
+const OS_LABELS={'sent':'\u2713 Sent','partial':'\u26a0 Partial','pending':'... Pending','no_webhook':'! No Webhook','skipped':'\u23ed Skipped','grok_failed':'! Grok Failed','no_emails':'\u2014 No Emails','no_verified_emails':'\u2014 No Verified Emails','draft_failed':'! Draft Failed','send_failed':'! Send Failed'};
 
-async function connectWebhook(){
-  const input=document.getElementById('webhook-input');
-  const url=input.value.trim();
-  if(!url){alert('Please enter a webhook URL');return}
-  try{
-    const r=await fetch('/api/webhook',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
-    if(r.ok){
-      const btn=document.getElementById('webhook-btn');
-      const status=document.getElementById('webhook-status');
-      btn.textContent='\u2713 Connected';btn.classList.add('connected');
-      status.textContent='Connected';status.className='wh-status ok';
-    }else{alert('Failed to save webhook URL')}
-  }catch(e){alert('Error: '+e.message)}}
+
 
 function openModal(idx){
   const j=allJobs[idx]; if(!j)return;
@@ -519,11 +496,16 @@ function renderOutreachSection(leadId){
   const stLabel=OS_LABELS[st]||st;
   const stClass='os-'+st;
 
-  let html=`<div class="outreach-section"><h4>// Outreach Details</h4>`;
+  let html=`<div class="outreach-section"><h4>// Outreach Pipeline Details</h4>`;
   html+=`<div class="outreach-status ${stClass}">${stLabel}</div>`;
 
   if(o.skipped_reason){
     html+=`<div style="font-size:12px;color:var(--text-muted);margin-top:6px">Reason: ${esc(o.skipped_reason)}</div>`;
+  }
+
+  // Grok response
+  if(o.grok_response){
+    html+=`<details class="grok-box"><summary>\u25b8 View Grok Search Response</summary><div class="grok-content">${esc(o.grok_response)}</div></details>`;
   }
 
   // Contact badges
@@ -541,7 +523,7 @@ function renderOutreachSection(leadId){
 
   // Email preview
   if(o.email_subject){
-    html+=`<div class="email-preview"><div class="ep-subject">\u2709 ${esc(o.email_subject)}</div><div class="ep-body">${esc(o.email_body)}</div></div>`;
+    html+=`<div class="email-preview"><div class="ep-subject">\u2709 ${esc(o.email_subject)}</div><div class="ep-body">${o.email_body||''}</div></div>`;
   }
 
   // Send status per email
@@ -596,14 +578,14 @@ function renderRuns(runs){
 }
 async function toggleOutreached(id,btn){
   if(!confirm('Mark this lead as outreached?'))return;
-  try{const r=await fetch('/api/lead/outreach',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  try{const r=await fetch(API_LEAD_OUTREACH,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
     if(r.ok){btn.textContent='\u2713 Outreached';btn.classList.add('active');btn.disabled=true}
     else{alert('Failed to update')}}
   catch(e){alert('Error: '+e.message)}}
 
 async function deleteLead(id){
   if(!confirm('Delete this lead permanently?'))return;
-  try{const r=await fetch('/api/lead/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  try{const r=await fetch(API_LEAD_DELETE,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
     if(r.ok){const card=document.getElementById('lead-card-'+id);if(card)card.remove();refresh()}
     else{alert('Failed to delete')}}
   catch(e){alert('Error: '+e.message)}}
@@ -611,7 +593,7 @@ async function deleteLead(id){
 async function deleteAllData(){
   if(!confirm('\u26a0\ufe0f DELETE ALL DATA?\n\nThis will permanently remove ALL scraped jobs, leads, run history, and seen jobs.\n\nThis action cannot be undone!'))return;
   if(!confirm('Are you absolutely sure? ALL data will be lost.'))return;
-  try{const r=await fetch('/api/delete-all',{method:'POST'});
+  try{const r=await fetch(API_DELETE_ALL,{method:'POST'});
     if(r.ok){alert('All data has been deleted.');refresh()}
     else{alert('Failed to delete data')}}
   catch(e){alert('Error: '+e.message)}}
@@ -621,14 +603,6 @@ async function refresh(){
     _outreachMap=data.outreach_map||{};
     renderStats(data.stats);renderRunBanner(data.last_run);renderJobs(data.recent_jobs||[]);renderLeads(data.recent_leads||[]);renderRuns(data.recent_runs||[]);
     document.getElementById('live-text').textContent='Live';
-    // Update webhook UI
-    if(data.webhook_url){
-      document.getElementById('webhook-input').value=data.webhook_url;
-      document.getElementById('webhook-btn').textContent='\u2713 Connected';
-      document.getElementById('webhook-btn').classList.add('connected');
-      document.getElementById('webhook-status').textContent='Connected';
-      document.getElementById('webhook-status').className='wh-status ok';
-    }
   }catch(e){document.getElementById('live-text').textContent='Offline';console.error('Refresh error:',e)}}
 refresh();setInterval(refresh,10000);
 </script>
@@ -645,16 +619,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(get_dashboard_json().encode())
-        elif path == '/api/webhook':
-            conn = get_db()
-            try:
-                row = conn.execute("SELECT value FROM settings WHERE key='n8n_webhook_url'").fetchone()
-                url = row['value'] if row else ''
-                self._json_response({'url': url})
-            except Exception as e:
-                self._json_response({'error': str(e)}, 500)
-            finally:
-                conn.close()
+
         else:
             self.send_response(200)
             self.send_header('Content-Type', 'text/html')
@@ -691,20 +656,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json_response({'error': str(e)}, 500)
 
-        elif path == '/api/webhook':
-            try:
-                data = json.loads(body)
-                url = data.get('url', '')
-                conn = get_db()
-                conn.execute(
-                    'INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
-                    ('n8n_webhook_url', url)
-                )
-                conn.commit()
-                conn.close()
-                self._json_response({'ok': True, 'url': url})
-            except Exception as e:
-                self._json_response({'error': str(e)}, 500)
+
 
         elif path == '/api/delete-all':
             try:
