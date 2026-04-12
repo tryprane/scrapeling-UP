@@ -283,11 +283,14 @@ def run_poll_cycle(cycle_number: int):
             if config["enable_notifications"]:
                 notify_desktop(result, job["title"])
 
+            page = None
             try:
                 page = start_browser(headless=config["headless"])
                 run_outreach_pipeline(page, job, result, lead_db_id)
             except Exception as oe:
                 log_step("outreach", f"pipeline error: {oe}", cycle=cycle_number, lead_id=lead_db_id)
+            finally:
+                close_browser()
         elif result.get("status") == "NO_LEAD":
             reason = result.get("reason", "")
             reason_str = f" ({reason})" if reason else ""
