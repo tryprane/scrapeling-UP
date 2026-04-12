@@ -8,6 +8,7 @@ browser profile.
 
 from __future__ import annotations
 
+import os
 import html as html_lib
 import random
 import re
@@ -18,6 +19,11 @@ from colorama import Fore, Style
 from scrapling.fetchers import StealthySession
 
 UPWORK_BASE = "https://www.upwork.com"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = str(os.getenv(name, str(default))).strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 def _parse_posted_age_minutes(posted_text):
@@ -287,7 +293,13 @@ def scrape_all_jobs(search_urls, headless=False, max_minutes=15):
     all_jobs = []
     seen_urls = set()
 
-    with StealthySession(headless=headless, solve_cloudflare=True) as session:
+    with StealthySession(
+        headless=headless,
+        solve_cloudflare=True,
+        google_search=_env_bool("SCRAPLING_GOOGLE_SEARCH", True),
+        locale="en-US",
+        timezone_id="UTC",
+    ) as session:
         for i, url in enumerate(search_urls):
             print(f"\n{Fore.BLUE}  Search URL {i + 1}/{len(search_urls)}{Style.RESET_ALL}")
 
