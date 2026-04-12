@@ -110,6 +110,22 @@ def _strip_html_to_text(raw_html: str) -> str:
     return raw_html
 
 
+def _node_text(node) -> str:
+    """Extract text from Scrapling nodes, falling back to HTML stripping."""
+    try:
+        text = (node.text or "").strip()
+        if text:
+            return text
+    except Exception:
+        pass
+
+    try:
+        raw_html = node.get() or ""
+        return _strip_html_to_text(raw_html)
+    except Exception:
+        return ""
+
+
 def _extract_description(page) -> str:
     selectors = [
         '[data-test="description"]',
@@ -179,7 +195,9 @@ def scrape_search_page(session, search_url: str):
                 continue
 
             link_el = link_candidates[0]
-            title = (link_el.text or "").strip()
+            title = _node_text(link_el)
+            if not title:
+                title = _node_text(card.css("h2").first) if card.css("h2") else ""
             href = link_el.attrib.get("href", "")
             job_url = _normalise_url(href)
             if not title or not job_url:
