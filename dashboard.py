@@ -608,6 +608,8 @@ function renderOutreachSection(leadId){
   // Contact badges
   const c=o.contacts_json||{};
   const emails=c.emails||[];
+  const candidateEmails=c.candidate_emails||[];
+  const verifiedEmails=c.verified_emails||[];
   const linkedins=c.linkedin_urls||[];
   const instas=c.instagram_handles||[];
   if(emails.length||linkedins.length||instas.length){
@@ -615,6 +617,12 @@ function renderOutreachSection(leadId){
     emails.forEach(e=>html+=`<span class="contact-badge email">\u2709 ${esc(e)}</span>`);
     linkedins.forEach(l=>html+=`<span class="contact-badge linkedin">in ${esc(l.replace(/https?:\/\/(www\.)?linkedin\.com\//,''))}</span>`);
     instas.forEach(ig=>html+=`<span class="contact-badge instagram">\u25cf ${esc(ig)}</span>`);
+    html+=`</div>`;
+  }
+
+  if(candidateEmails.length || verifiedEmails.length){
+    html+=`<div style="margin-top:10px;font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace">`;
+    html+=`Candidates: ${candidateEmails.length || 0} | Verified: ${verifiedEmails.length || 0}`;
     html+=`</div>`;
   }
 

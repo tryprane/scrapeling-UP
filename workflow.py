@@ -158,11 +158,12 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
     log_step("outreach", "verifying candidate emails", lead_id=lead_db_id, email_count=len(candidate_emails))
     verification = verify_emails(candidate_emails, do_smtp_probe=True)
     sendable_emails = get_sendable_emails(verification, include_risky=False)
+    contacts["verification"] = verification["details"]
+    contacts["candidate_emails"] = candidate_emails
+    contacts["verified_emails"] = sendable_emails
 
     if not sendable_emails:
         log_step("outreach", "no verified emails after verification", lead_id=lead_db_id)
-        contacts["emails"] = []
-        contacts["verification"] = verification["details"]
         save_outreach_result(
             lead_id=lead_db_id,
             grok_response=raw_search_response,
@@ -173,7 +174,6 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
 
     log_step("outreach", "emails verified and ready", lead_id=lead_db_id, sendable_emails=sendable_emails)
     contacts["emails"] = sendable_emails
-    contacts["verification"] = verification["details"]
 
     log_step("outreach", "generating email draft", lead_id=lead_db_id)
     email_data = generate_email_draft(job, contacts)
