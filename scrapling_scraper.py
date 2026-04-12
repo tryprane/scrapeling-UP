@@ -112,18 +112,24 @@ def _strip_html_to_text(raw_html: str) -> str:
 
 def _node_text(node) -> str:
     """Extract text from Scrapling nodes, falling back to HTML stripping."""
+    raw_html = ""
+    html_text = ""
     try:
         text = (node.text or "").strip()
-        if text:
-            return text
     except Exception:
-        pass
+        text = ""
 
     try:
         raw_html = node.get() or ""
-        return _strip_html_to_text(raw_html)
+        html_text = _strip_html_to_text(raw_html)
     except Exception:
-        return ""
+        html_text = ""
+
+    if html_text and len(html_text) >= len(text):
+        return html_text
+    if text:
+        return text
+    return html_text
 
 
 def _extract_description(page) -> str:
