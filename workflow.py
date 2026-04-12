@@ -140,7 +140,7 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
         )
         return
 
-    contacts = discover_contacts(page, job, lead_result)
+    contacts = discover_contacts(page, job, lead_result, logger=log_step)
     raw_search_response = contacts.get("search_response", "")
     candidate_emails = contacts.get("emails", [])
     log_step("outreach", "contact discovery completed", lead_id=lead_db_id, candidate_emails=len(candidate_emails))

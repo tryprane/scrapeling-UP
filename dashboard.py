@@ -12,6 +12,8 @@ import json
 import sqlite3
 import os
 import sys
+from collections import deque
+from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -22,6 +24,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'leads.db')
+LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'workflow.log')
 
 
 def _ensure_schema(conn):
@@ -62,6 +65,85 @@ def get_db():
     conn.row_factory = sqlite3.Row
     _ensure_schema(conn)
     return conn
+
+
+def _parse_log_timestamp(value):
+    if not value:
+        return None
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M:%S.%f'):
+        try:
+            return datetime.strptime(value, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _normalize_log_entry(entry):
+    if not isinstance(entry, dict):
+        return {
+            'timestamp': '',
+            'cycle': None,
+            'stage': 'raw',
+            'message': str(entry),
+            'fields': {},
+        }
+
+    base_keys = {'timestamp', 'cycle', 'stage', 'message'}
+    return {
+        'timestamp': entry.get('timestamp', ''),
+        'cycle': entry.get('cycle'),
+        'stage': entry.get('stage', 'raw'),
+        'message': entry.get('message', ''),
+        'fields': {k: v for k, v in entry.items() if k not in base_keys},
+    }
+
+
+def get_recent_logs(hours=24, limit=600):
+    cutoff = datetime.now() - timedelta(hours=hours)
+    entries = deque(maxlen=limit)
+    scanned = 0
+
+    if not os.path.exists(LOG_PATH):
+        return {
+            'entries': [],
+            'count': 0,
+            'truncated': False,
+            'hours': hours,
+        }
+
+    try:
+        with open(LOG_PATH, 'r', encoding='utf-8', errors='replace') as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    payload = {'timestamp': '', 'stage': 'raw', 'message': line}
+
+                ts = _parse_log_timestamp(payload.get('timestamp'))
+                if ts and ts < cutoff:
+                    break
+
+                entries.append(_normalize_log_entry(payload))
+                scanned += 1
+    except Exception as e:
+        return {
+            'entries': [],
+            'count': 0,
+            'truncated': False,
+            'hours': hours,
+            'error': str(e),
+        }
+
+    return {
+        'entries': list(entries),
+        'count': scanned,
+        'truncated': scanned > limit,
+        'hours': hours,
+    }
 
 
 def get_dashboard_json():
@@ -259,6 +341,18 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opa
 .run-row:hover{border-color:var(--border-bright);background:var(--card-hover)}
 .run-row .run-time{color:var(--text-muted);font-size:11px;font-family:'JetBrains Mono',monospace}
 
+/* Logs */
+.log-panel{background:var(--card);border:1px solid var(--border);border-radius:12px;max-height:520px;overflow:auto;padding:8px}
+.log-entry{padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.05)}
+.log-entry:last-child{border-bottom:none}
+.log-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.log-ts{color:var(--text-muted);font-size:10px;font-family:'JetBrains Mono',monospace}
+.log-stage{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;border:1px solid var(--border-bright);font-size:9px;font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:1px}
+.log-cycle{color:var(--text-secondary);font-size:10px;font-family:'JetBrains Mono',monospace}
+.log-msg{font-size:12px;line-height:1.5;color:var(--text)}
+.log-fields{margin-top:8px;padding:10px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px;color:var(--text-muted);font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-word;font-family:'JetBrains Mono',monospace}
+.log-empty{padding:22px;color:var(--text-muted);text-align:center;border:1px dashed var(--border);border-radius:10px}
+
 /* Modal */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);backdrop-filter:blur(8px);z-index:1000;justify-content:center;align-items:flex-start;padding:40px 20px;overflow-y:auto}
 .modal-overlay.active{display:flex}
@@ -354,6 +448,8 @@ body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opa
   <div id="leads-toggle" style="text-align:center;margin:4px 0 12px"></div>
   <div class="section-header" style="margin-top:32px"><h2>// Run History</h2></div>
   <div class="runs-list" id="runs-list"></div>
+  <div class="section-header" style="margin-top:32px"><h2>// Logs (24h)</h2><span class="count" id="logs-count"></span></div>
+  <div class="log-panel" id="logs-panel"></div>
   <div class="footer">Lead Hunter v2.0 &mdash; Python/Patchright &mdash; Femur Studio</div>
 </div>
 
@@ -387,6 +483,7 @@ const API = BASE_PATH + '/api/data';
 const API_LEAD_OUTREACH = BASE_PATH + '/api/lead/outreach';
 const API_LEAD_DELETE = BASE_PATH + '/api/lead/delete';
 const API_DELETE_ALL = BASE_PATH + '/api/delete-all';
+const API_LOGS = BASE_PATH + '/api/logs?hours=24&limit=600';
 let allJobs=[];
 let showAllJobs=false;
 let showAllLeads=false;
@@ -576,6 +673,50 @@ function renderRuns(runs){
     const sc=r.status==='running'?'status-running':r.status==='error'?'status-error':'status-completed';
     return `<div class="run-row"><span class="cycle-num">#${r.cycle}</span><span class="status-badge ${sc}">${r.status.toUpperCase()}</span><span class="run-time">${fmtTime(r.started_at)} \u2192 ${fmtTime(r.completed_at)}</span><span>${r.jobs_found} jobs</span><span>${r.jobs_new} new</span><span>${r.leads_found} leads</span></div>`}).join('');
 }
+function renderLogs(payload){
+  const panel=document.getElementById('logs-panel');
+  const countEl=document.getElementById('logs-count');
+  const entries=(payload&&payload.entries)||[];
+  const count=(payload&&payload.count)||entries.length;
+  countEl.textContent=`${count} lines`;
+
+  if(!entries.length){
+    panel.innerHTML='<div class="log-empty">No workflow logs for the last 24 hours</div>';
+    return;
+  }
+
+  const rows=entries.map((entry)=>{
+    const ts=esc(entry.timestamp||'\u2014');
+    const stage=esc(entry.stage||'raw');
+    const cycle=entry.cycle===null||entry.cycle===undefined||entry.cycle===''?'':'#'+esc(entry.cycle);
+    const msg=esc(entry.message||'');
+    const fields=entry.fields&&Object.keys(entry.fields).length?`<div class="log-fields">${esc(JSON.stringify(entry.fields, null, 2))}</div>`:'';
+    return `<div class="log-entry">
+      <div class="log-head">
+        <span class="log-ts">${ts}</span>
+        <span class="log-stage">${stage}</span>
+        ${cycle?`<span class="log-cycle">${cycle}</span>`:''}
+      </div>
+      <div class="log-msg">${msg}</div>
+      ${fields}
+    </div>`;
+  }).join('');
+
+  panel.innerHTML=rows;
+  if(payload.truncated){
+    countEl.textContent=`${count} lines (capped)`;
+  }
+}
+async function refreshLogs(){
+  try{
+    const res=await fetch(API_LOGS);
+    const data=await res.json();
+    if(data.error){console.error(data.error);return}
+    renderLogs(data);
+  }catch(e){
+    console.error('Logs refresh error:',e);
+  }
+}
 async function toggleOutreached(id,btn){
   if(!confirm('Mark this lead as outreached?'))return;
   try{const r=await fetch(API_LEAD_OUTREACH,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
@@ -604,7 +745,10 @@ async function refresh(){
     renderStats(data.stats);renderRunBanner(data.last_run);renderJobs(data.recent_jobs||[]);renderLeads(data.recent_leads||[]);renderRuns(data.recent_runs||[]);
     document.getElementById('live-text').textContent='Live';
   }catch(e){document.getElementById('live-text').textContent='Offline';console.error('Refresh error:',e)}}
-refresh();setInterval(refresh,10000);
+refresh();
+refreshLogs();
+setInterval(refresh,10000);
+setInterval(refreshLogs,30000);
 </script>
 </body>
 </html>"""
@@ -619,6 +763,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(get_dashboard_json().encode())
+
+        elif path == '/api/logs':
+            query = parse_qs(urlparse(self.path).query)
+            try:
+                hours = max(1, min(int(query.get('hours', ['24'])[0]), 72))
+            except Exception:
+                hours = 24
+            try:
+                limit = max(50, min(int(query.get('limit', ['600'])[0]), 1000))
+            except Exception:
+                limit = 600
+            payload = get_recent_logs(hours=hours, limit=limit)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode())
 
         else:
             self.send_response(200)
