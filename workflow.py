@@ -38,6 +38,7 @@ from db import (
     save_outreach_result,
     save_scraped_job,
     start_run,
+    update_run_progress,
     update_job_ai_status,
 )
 from notifier import log_lead_to_file, notify_desktop, print_lead
@@ -234,6 +235,7 @@ def run_poll_cycle(cycle_number: int):
         return
 
     log_step("scrape", f"found {len(jobs)} eligible job listings", cycle=cycle_number)
+    update_run_progress(run_id, jobs_found=len(jobs), jobs_new=0, leads_found=0)
     if not jobs:
         log_step("cycle", "no jobs found; cycle complete", cycle=cycle_number)
         complete_run(run_id, jobs_found=0, jobs_new=0, leads_found=0)
@@ -241,6 +243,7 @@ def run_poll_cycle(cycle_number: int):
 
     new_jobs = [j for j in jobs if not is_job_seen(j["job_url"])]
     log_step("filter", f"{len(new_jobs)} new jobs to analyze", cycle=cycle_number)
+    update_run_progress(run_id, jobs_found=len(jobs), jobs_new=len(new_jobs), leads_found=0)
 
     if not new_jobs:
         log_step("cycle", "all jobs already processed", cycle=cycle_number)
@@ -269,6 +272,7 @@ def run_poll_cycle(cycle_number: int):
             lead_db_id = save_lead(job["job_url"], job["title"], result)
             log_lead_to_file(result, job)
             update_job_ai_status(job_db_id, "lead_found", result)
+            update_run_progress(run_id, jobs_found=len(jobs), jobs_new=len(new_jobs), leads_found=leads_found)
 
             if config["enable_notifications"]:
                 notify_desktop(result, job["title"])
@@ -286,10 +290,12 @@ def run_poll_cycle(cycle_number: int):
             reason_str = f" ({reason})" if reason else ""
             log_step("analyze", f"no lead{reason_str}", cycle=cycle_number, title=job["title"][:80])
             update_job_ai_status(job_db_id, "no_lead", result)
+            update_run_progress(run_id, jobs_found=len(jobs), jobs_new=len(new_jobs), leads_found=leads_found)
         else:
             error_msg = str(result.get("error", ""))
             log_step("analyze", f"AI issue: {error_msg}", cycle=cycle_number, title=job["title"][:80])
             update_job_ai_status(job_db_id, "error", result, error_msg)
+            update_run_progress(run_id, jobs_found=len(jobs), jobs_new=len(new_jobs), leads_found=leads_found)
 
         log_step("throttle", f"waiting {config['ai_call_delay_seconds']} seconds before next AI call", cycle=cycle_number)
         time.sleep(config["ai_call_delay_seconds"])

@@ -171,6 +171,30 @@ def start_run(cycle: int) -> int:
     return cur.lastrowid
 
 
+def update_run_progress(run_id: int, jobs_found: int = None, jobs_new: int = None, leads_found: int = None):
+    """Update a running cycle with live progress counters."""
+    fields = []
+    values = []
+    if jobs_found is not None:
+        fields.append("jobs_found=?")
+        values.append(jobs_found)
+    if jobs_new is not None:
+        fields.append("jobs_new=?")
+        values.append(jobs_new)
+    if leads_found is not None:
+        fields.append("leads_found=?")
+        values.append(leads_found)
+    if not fields:
+        return
+
+    values.append(run_id)
+    _conn.execute(
+        f"UPDATE run_status SET {', '.join(fields)} WHERE id=?",
+        tuple(values),
+    )
+    _conn.commit()
+
+
 def complete_run(run_id: int, jobs_found: int, jobs_new: int, leads_found: int):
     """Mark a run as completed."""
     _conn.execute(
