@@ -186,12 +186,20 @@ def _is_company_website(url: str) -> bool:
         'upwork.com', 'freelancer.com', 'fiverr.com', 'indeed.com',
         'glassdoor.com', 'crunchbase.com', 'bloomberg.com', 'techcrunch.com',
         'wikipedia.org', 'reddit.com', 'medium.com', 'quora.com',
+        'w3.org', 'duckduckgo.com', 'search.google.com', 'maps.google.com',
     }
     try:
-        netloc = urlparse(url).netloc.lower().lstrip('www.')
+        netloc = urlparse(url).netloc.lower()
+        if netloc.startswith('www.'):
+            netloc = netloc[4:]
         return not any(netloc == d or netloc.endswith('.' + d) for d in skip_domains)
     except Exception:
         return False
+
+
+def is_company_website(url: str) -> bool:
+    """Public wrapper for company-site filtering."""
+    return _is_company_website(url)
 
 
 # ── Standalone test ──────────────────────────────────────────────────

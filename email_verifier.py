@@ -227,7 +227,27 @@ def verify_emails(emails: list[str], do_smtp_probe: bool = True) -> dict:
     }
 
 
-def get_sendable_emails(verification_result: dict, include_risky: bool = False) -> list[str]:
+def _is_business_unknown(detail: dict) -> bool:
+    """Return True when an inconclusive email still looks like a business mailbox."""
+    if not detail:
+        return False
+    email = (detail.get('email') or '').strip().lower()
+    if '@' not in email:
+        return False
+    domain = email.split('@')[-1]
+    if domain in RISKY_DOMAINS:
+        return False
+    if not detail.get('mx'):
+        return False
+    status = (detail.get('status') or '').lower()
+    return status == 'unknown'
+
+
+def get_sendable_emails(
+    verification_result: dict,
+    include_risky: bool = False,
+    include_unknown_business: bool = False,
+) -> list[str]:
     """
     Get the list of emails safe to send to from a verify_emails() result.
 
@@ -235,6 +255,10 @@ def get_sendable_emails(verification_result: dict, include_risky: bool = False) 
         verification_result: Output of verify_emails()
         include_risky: If True, also include 'risky' (free provider) emails.
                        Default False — only send to verified business emails.
+        include_unknown_business: If True, include inconclusive business emails
+                                  when MX records exist but SMTP probing was not
+                                  definitive. Useful when outbound SMTP probing
+                                  is blocked by the VPS/network.
 
     Returns:
         List of email addresses to send to.
@@ -242,7 +266,23 @@ def get_sendable_emails(verification_result: dict, include_risky: bool = False) 
     sendable = list(verification_result['verified'])
     if include_risky:
         sendable.extend(verification_result['risky'])
-    return sendable
+
+    if include_unknown_business:
+        details = verification_result.get('details', []) or []
+        for detail in details:
+            if _is_business_unknown(detail):
+                sendable.append(detail['email'])
+
+    # Preserve order while deduplicating.
+    deduped = []
+    seen = set()
+    for email in sendable:
+        key = email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(email)
+    return deduped
 
 
 # ── Standalone test ──────────────────────────────────────────────────

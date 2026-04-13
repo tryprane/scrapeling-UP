@@ -610,6 +610,7 @@ function renderOutreachSection(leadId){
   const emails=c.emails||[];
   const candidateEmails=c.candidate_emails||[];
   const verifiedEmails=c.verified_emails||[];
+  const sendableEmails=c.sendable_emails||[];
   const linkedins=c.linkedin_urls||[];
   const instas=c.instagram_handles||[];
   if(emails.length||linkedins.length||instas.length){
@@ -620,9 +621,9 @@ function renderOutreachSection(leadId){
     html+=`</div>`;
   }
 
-  if(candidateEmails.length || verifiedEmails.length){
+  if(candidateEmails.length || verifiedEmails.length || sendableEmails.length){
     html+=`<div style="margin-top:10px;font-size:11px;color:var(--text-muted);font-family:'JetBrains Mono',monospace">`;
-    html+=`Candidates: ${candidateEmails.length || 0} | Verified: ${verifiedEmails.length || 0}`;
+    html+=`Candidates: ${candidateEmails.length || 0} | Verified: ${verifiedEmails.length || 0} | Sendable: ${sendableEmails.length || 0}`;
     html+=`</div>`;
   }
 

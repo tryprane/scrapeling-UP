@@ -16,6 +16,7 @@ from public_web_search import search_public_web
 from website_scraper import (
     extract_emails_from_text,
     extract_website_urls_from_text,
+    is_company_website,
     scrape_emails_from_websites,
 )
 
@@ -33,6 +34,23 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
         seen.add(key)
         ordered.append(item)
     return ordered
+
+
+def _filter_company_websites(urls: list[str]) -> list[str]:
+    """Keep only company-like website URLs and preserve order."""
+    filtered: list[str] = []
+    seen = set()
+    for raw in urls:
+        url = (raw or "").strip()
+        if not url:
+            continue
+        key = url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if is_company_website(url):
+            filtered.append(url)
+    return filtered
 
 
 def build_lead_summary(job: dict, lead_result: dict) -> str:
@@ -88,7 +106,7 @@ def discover_contacts(page, job: dict, lead_result: dict, logger=None) -> dict:
     if search_response:
         contacts["search_response"] = search_response
         found_emails = extract_emails_from_text(search_response)
-        found_websites = extract_website_urls_from_text(search_response)
+        found_websites = _filter_company_websites(extract_website_urls_from_text(search_response))
         contacts["emails"].extend(found_emails)
         contacts["websites"].extend(found_websites)
         log(
@@ -121,14 +139,14 @@ def discover_contacts(page, job: dict, lead_result: dict, logger=None) -> dict:
         for term in _dedupe_keep_order(search_query_terms):
             log("contact-discovery", f"public search query: {term}")
             results = search_public_web(term, max_results=5)
-            discovered_urls.extend([r.url for r in results if r.url])
+            discovered_urls.extend([r.url for r in results if r.url and is_company_website(r.url)])
         websites.extend(discovered_urls)
 
     ci_website = (ci.get("website", "") or "").strip()
-    if ci_website:
+    if ci_website and is_company_website(ci_website):
         websites.append(ci_website)
 
-    websites = _dedupe_keep_order(websites)
+    websites = _filter_company_websites(_dedupe_keep_order(websites))
     scraped_emails: list[str] = []
     if websites:
         log(
