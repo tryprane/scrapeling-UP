@@ -29,6 +29,10 @@ config = {
     # runs, or keep false when using a visible browser / virtual display.
     'headless': os.getenv('HEADLESS', 'false').lower() == 'true',
 
+    # When true, outreach uses discovered emails directly instead of requiring
+    # SMTP verification. This is useful when the VPS cannot reach port 25.
+    'skip_email_verification': os.getenv('SKIP_EMAIL_VERIFICATION', 'true').lower() == 'true',
+
     # Gmail API — address used as the From: header when sending outreach emails.
     # Set this to your Gmail address in .env as GMAIL_SENDER=you@gmail.com
     # Leave blank to use 'me' (Gmail API resolves the authorized account automatically).

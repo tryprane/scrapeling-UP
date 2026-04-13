@@ -12,7 +12,6 @@ from __future__ import annotations
 from colorama import Fore
 
 from gemini_searcher import search_contacts_via_gemini
-from public_web_search import search_public_web
 from website_scraper import (
     extract_emails_from_text,
     extract_website_urls_from_text,
@@ -117,30 +116,6 @@ def discover_contacts(page, job: dict, lead_result: dict, logger=None) -> dict:
         )
 
     websites = list(contacts.get("websites", []))
-    if not websites:
-        search_query_terms = []
-        company_name = (ci.get("company_name", "") or "").strip()
-        guessed_person = (ci.get("guessed_person", "") or "").strip()
-        website = (ci.get("website", "") or "").strip()
-        if company_name:
-            search_query_terms.extend([
-                f"{company_name} official website",
-                f"{company_name} contact email",
-                f"{company_name} LinkedIn",
-            ])
-        if guessed_person and company_name:
-            search_query_terms.append(f'"{guessed_person}" "{company_name}" contact')
-        if website:
-            search_query_terms.append(f"{website} contact email")
-        if job.get("title"):
-            search_query_terms.append(f'{job["title"]} client website')
-
-        discovered_urls = []
-        for term in _dedupe_keep_order(search_query_terms):
-            log("contact-discovery", f"public search query: {term}")
-            results = search_public_web(term, max_results=5)
-            discovered_urls.extend([r.url for r in results if r.url and is_company_website(r.url)])
-        websites.extend(discovered_urls)
 
     ci_website = (ci.get("website", "") or "").strip()
     if ci_website and is_company_website(ci_website):

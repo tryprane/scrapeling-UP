@@ -40,7 +40,6 @@ from db import (
     start_run,
     update_job_ai_status,
 )
-from email_verifier import get_sendable_emails, verify_emails
 from notifier import log_lead_to_file, notify_desktop, print_lead
 from outreach_mailer import generate_email_draft, should_skip_job
 from prane_mailer import plain_text_to_html, send_batch
@@ -155,38 +154,16 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
         )
         return
 
-    log_step("outreach", "verifying candidate emails", lead_id=lead_db_id, email_count=len(candidate_emails))
-    verification = verify_emails(candidate_emails, do_smtp_probe=True)
-    sendable_emails = get_sendable_emails(
-        verification,
-        include_risky=False,
-        include_unknown_business=True,
-    )
-    contacts["verification"] = verification["details"]
     contacts["candidate_emails"] = candidate_emails
-    contacts["verified_emails"] = verification["verified"]
-    contacts["sendable_emails"] = sendable_emails
+    contacts["verified_emails"] = []
+    contacts["sendable_emails"] = candidate_emails
 
-    if not sendable_emails:
-        log_step("outreach", "no verified emails after verification", lead_id=lead_db_id)
-        save_outreach_result(
-            lead_id=lead_db_id,
-            grok_response=raw_search_response,
-            contacts=contacts,
-            send_status="no_verified_emails",
-        )
-        return
-
-    if verification["verified"]:
-        log_step("outreach", "emails verified and ready", lead_id=lead_db_id, sendable_emails=sendable_emails)
+    if config.get("skip_email_verification", False):
+        log_step("outreach", "email verification skipped; using discovered emails directly", lead_id=lead_db_id, sendable_emails=candidate_emails)
     else:
-        log_step(
-            "outreach",
-            "using MX-only business fallback for SMTP-inconclusive emails",
-            lead_id=lead_db_id,
-            sendable_emails=sendable_emails,
-        )
-    contacts["emails"] = sendable_emails
+        log_step("outreach", "email verification disabled only when SKIP_EMAIL_VERIFICATION=true", lead_id=lead_db_id, sendable_emails=candidate_emails)
+
+    contacts["emails"] = candidate_emails
 
     log_step("outreach", "generating email draft", lead_id=lead_db_id)
     email_data = generate_email_draft(job, contacts)
