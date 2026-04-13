@@ -29,6 +29,8 @@ JUNK_EMAIL_DOMAINS = {
     'squarespace.com', 'shopify.com', 'wordpress.com',
     'placeholder.com', 'domain.com', 'yourdomain.com',
     'email.com', 'user.com', 'company.com',
+    'w3.org', 'duck.com', 'duckduckgo.com', 'search.google.com',
+    'maps.google.com', 'itgovernance.eu', 'grcilaw.com',
 }
 
 # Paths to try on a site after the homepage
