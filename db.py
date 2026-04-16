@@ -32,6 +32,14 @@ def init_db():
             job_title  TEXT,
             job_url    TEXT,
             payload    TEXT,
+            job_description TEXT DEFAULT '',
+            contact_discovery_json TEXT DEFAULT '{}',
+            discovered_emails_json TEXT DEFAULT '[]',
+            outreach_status TEXT DEFAULT 'pending',
+            outreach_result_json TEXT DEFAULT '{}',
+            email_subject TEXT DEFAULT '',
+            email_body TEXT DEFAULT '',
+            emails_sent_to_json TEXT DEFAULT '[]',
             created_at TEXT DEFAULT (datetime('now'))
         );
 
@@ -82,7 +90,31 @@ def init_db():
         );
     """)
     _conn.commit()
+    _ensure_lead_columns()
     return _conn
+
+
+def _ensure_lead_columns():
+    """Add lead columns safely for older databases."""
+    try:
+        cols = {r[1] for r in _conn.execute("PRAGMA table_info(leads)").fetchall()}
+        migrations = [
+            ("job_description", "TEXT DEFAULT ''"),
+            ("contact_discovery_json", "TEXT DEFAULT '{}'"),
+            ("discovered_emails_json", "TEXT DEFAULT '[]'"),
+            ("outreach_status", "TEXT DEFAULT 'pending'"),
+            ("outreach_result_json", "TEXT DEFAULT '{}'"),
+            ("email_subject", "TEXT DEFAULT ''"),
+            ("email_body", "TEXT DEFAULT ''"),
+            ("emails_sent_to_json", "TEXT DEFAULT '[]'"),
+            ("outreached", "INTEGER DEFAULT 0"),
+        ]
+        for col, ddl in migrations:
+            if col not in cols:
+                _conn.execute(f"ALTER TABLE leads ADD COLUMN {col} {ddl}")
+        _conn.commit()
+    except Exception:
+        pass
 
 
 def cleanup_old_data():
@@ -131,15 +163,119 @@ def mark_job_seen(job_url: str, title: str):
     _conn.commit()
 
 
-def save_lead(job_url: str, job_title: str, payload: dict) -> int:
+def save_lead(
+    job_url: str,
+    job_title: str,
+    payload: dict,
+    job_description: str = '',
+    contact_discovery: dict = None,
+    discovered_emails: list = None,
+) -> int:
     """Save a discovered lead to the database. Returns the lead row ID."""
     url_hash = _hash_url(job_url)
+    lead_payload = dict(payload or {})
+    if job_description:
+        lead_payload['job_description'] = job_description
+    if contact_discovery is not None:
+        lead_payload['contact_discovery'] = contact_discovery or {}
+    if discovered_emails is not None:
+        lead_payload['discovered_emails'] = discovered_emails or []
     cur = _conn.execute(
-        'INSERT INTO leads (url_hash, job_title, job_url, payload) VALUES (?, ?, ?, ?)',
-        (url_hash, job_title, job_url, json.dumps(payload))
+        '''INSERT INTO leads (
+               url_hash, job_title, job_url, payload,
+               job_description, contact_discovery_json, discovered_emails_json
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)''',
+        (
+            url_hash,
+            job_title,
+            job_url,
+            json.dumps(lead_payload),
+            job_description or '',
+            json.dumps(contact_discovery or {}),
+            json.dumps(discovered_emails or []),
+        )
     )
     _conn.commit()
     return cur.lastrowid
+
+
+def update_lead_enrichment(
+    lead_id: int,
+    job_description: str = None,
+    contact_discovery: dict = None,
+    discovered_emails: list = None,
+    outreach_status: str = None,
+    outreach_result: dict = None,
+    email_subject: str = None,
+    email_body: str = None,
+    emails_sent_to: list = None,
+    outreached: int = None,
+):
+    """Backfill or update lead-side summary fields after discovery/outreach."""
+    fields = []
+    values = []
+
+    def add(field, value):
+        fields.append(f"{field}=?")
+        values.append(value)
+
+    if job_description is not None:
+        add("job_description", job_description or "")
+    if contact_discovery is not None:
+        add("contact_discovery_json", json.dumps(contact_discovery or {}))
+    if discovered_emails is not None:
+        add("discovered_emails_json", json.dumps(discovered_emails or []))
+    if outreach_status is not None:
+        add("outreach_status", outreach_status)
+    if outreach_result is not None:
+        add("outreach_result_json", json.dumps(outreach_result or {}))
+    if email_subject is not None:
+        add("email_subject", email_subject or "")
+    if email_body is not None:
+        add("email_body", email_body or "")
+    if emails_sent_to is not None:
+        add("emails_sent_to_json", json.dumps(emails_sent_to or []))
+    if outreached is not None:
+        add("outreached", int(outreached))
+
+    if not fields:
+        return
+
+    current = _conn.execute('SELECT payload FROM leads WHERE id=?', (lead_id,)).fetchone()
+    lead_payload = {}
+    if current and current['payload']:
+        try:
+            lead_payload = json.loads(current['payload'])
+        except Exception:
+            lead_payload = {}
+
+    if job_description is not None:
+        lead_payload['job_description'] = job_description or ''
+    if contact_discovery is not None:
+        lead_payload['contact_discovery'] = contact_discovery or {}
+    if discovered_emails is not None:
+        lead_payload['discovered_emails'] = discovered_emails or []
+    if outreach_status is not None:
+        lead_payload['outreach_status'] = outreach_status
+    if outreach_result is not None:
+        lead_payload['outreach_result'] = outreach_result or {}
+    if email_subject is not None:
+        lead_payload['email_subject'] = email_subject or ''
+    if email_body is not None:
+        lead_payload['email_body'] = email_body or ''
+    if emails_sent_to is not None:
+        lead_payload['emails_sent_to'] = emails_sent_to or []
+    if outreached is not None:
+        lead_payload['outreached'] = int(outreached)
+    fields.append('payload=?')
+    values.append(json.dumps(lead_payload))
+
+    values.append(lead_id)
+    _conn.execute(
+        f"UPDATE leads SET {', '.join(fields)} WHERE id=?",
+        tuple(values),
+    )
+    _conn.commit()
 
 
 def get_recent_leads(limit: int = 20) -> list:
@@ -147,9 +283,16 @@ def get_recent_leads(limit: int = 20) -> list:
     rows = _conn.execute(
         'SELECT * FROM leads ORDER BY created_at DESC LIMIT ?', (limit,)
     ).fetchall()
-    return [
-        {**dict(r), 'payload': json.loads(r['payload'])} for r in rows
-    ]
+    results = []
+    for r in rows:
+        row = dict(r)
+        row['payload'] = json.loads(r['payload']) if r['payload'] else {}
+        row['contact_discovery_json'] = json.loads(r['contact_discovery_json'] or '{}')
+        row['discovered_emails_json'] = json.loads(r['discovered_emails_json'] or '[]')
+        row['outreach_result_json'] = json.loads(r['outreach_result_json'] or '{}')
+        row['emails_sent_to_json'] = json.loads(r['emails_sent_to_json'] or '[]')
+        results.append(row)
+    return results
 
 
 def get_stats() -> dict:

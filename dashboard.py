@@ -31,8 +31,23 @@ def _ensure_schema(conn):
     """Add missing columns/tables (safe to call repeatedly)."""
     try:
         cols = [r[1] for r in conn.execute('PRAGMA table_info(leads)').fetchall()]
-        if 'outreached' not in cols:
-            conn.execute('ALTER TABLE leads ADD COLUMN outreached INTEGER DEFAULT 0')
+        lead_columns = {
+            'job_description': "TEXT DEFAULT ''",
+            'contact_discovery_json': "TEXT DEFAULT '{}'",
+            'discovered_emails_json': "TEXT DEFAULT '[]'",
+            'outreach_status': "TEXT DEFAULT 'pending'",
+            'outreach_result_json': "TEXT DEFAULT '{}'",
+            'email_subject': "TEXT DEFAULT ''",
+            'email_body': "TEXT DEFAULT ''",
+            'emails_sent_to_json': "TEXT DEFAULT '[]'",
+            'outreached': "INTEGER DEFAULT 0",
+        }
+        changed = False
+        for col, ddl in lead_columns.items():
+            if col not in cols:
+                conn.execute(f'ALTER TABLE leads ADD COLUMN {col} {ddl}')
+                changed = True
+        if changed:
             conn.commit()
     except Exception:
         pass
@@ -183,11 +198,32 @@ def get_dashboard_json():
             if lead_id and lead_id not in outreach_map:
                 outreach_map[lead_id] = o_dict
 
+        recent_leads_json = []
+        for r in recent_leads:
+            row = dict(r)
+            payload = json.loads(row.get('payload') or '{}')
+            row['payload'] = payload
+            row['contact_discovery_json'] = json.loads(row.get('contact_discovery_json') or '{}')
+            row['discovered_emails_json'] = json.loads(row.get('discovered_emails_json') or '[]')
+            row['outreach_result_json'] = json.loads(row.get('outreach_result_json') or '{}')
+            row['emails_sent_to_json'] = json.loads(row.get('emails_sent_to_json') or '[]')
+            row['job_description'] = row.get('job_description') or ''
+            lead_id = row.get('id')
+            if lead_id and lead_id in outreach_map:
+                outreach = outreach_map[lead_id]
+                row['outreach_status'] = outreach.get('send_status', row.get('outreach_status', 'pending'))
+                row['email_subject'] = outreach.get('email_subject', row.get('email_subject', ''))
+                row['email_body'] = outreach.get('email_body', row.get('email_body', ''))
+                row['emails_sent_to_json'] = outreach.get('emails_sent_to', row.get('emails_sent_to_json', []))
+                row['outreach_result_json'] = outreach
+                row['contact_discovery_json'] = outreach.get('contacts_json', row['contact_discovery_json'])
+            recent_leads_json.append(row)
+
         return json.dumps({
             'last_run': dict(last_run) if last_run else None,
             'recent_runs': [dict(r) for r in recent_runs],
             'recent_jobs': [{**dict(j), 'ai_result': json.loads(j['ai_result'] or '{}')} for j in recent_jobs],
-            'recent_leads': [{**dict(r), 'payload': json.loads(r['payload'] or '{}')} for r in recent_leads],
+            'recent_leads': recent_leads_json,
             'outreach_map': outreach_map,
             'stats': {
                 'total_seen': total_seen, 'total_leads': total_leads,
@@ -658,16 +694,25 @@ function renderLeadsView(){
   const visible=showAllLeads?leads:leads.slice(0,10);
   list.innerHTML=visible.map(l=>{
     const p=l.payload||{};const ci=p.client_info||{};const cs=p.contact_strategy||{};
+    const discoveredEmails=(l.discovered_emails_json||l.contact_discovery_json?.emails||[]).filter(Boolean);
+    const contactDiscovery=l.contact_discovery_json||{};
+    const sendStatus=l.outreach_status||l.outreach_result_json?.send_status||'pending';
+    const sentEmails=l.emails_sent_to_json||l.outreach_result_json?.emails_sent_to||[];
     const isOutreached=l.outreached==1;
     const outreachHtml=renderOutreachSection(l.id);
     return `<div class="lead-card" id="lead-card-${l.id}"><h3>${esc(l.job_title)}</h3>
       <div class="lead-meta">${fmtDT(l.created_at)} &middot; <a href="${esc(l.job_url)}" target="_blank">View on Upwork &rarr;</a></div>
       <div class="lead-info">
+        <div><div class="k">Description</div><div class="v">${esc(l.job_description||'No description available')}</div></div>
         <div><div class="k">Company</div><div class="v">${esc(ci.company_name||'\u2014')}</div></div>
         <div><div class="k">Contact</div><div class="v">${esc(ci.guessed_person||'\u2014')}</div></div>
         <div><div class="k">Website</div><div class="v">${esc(ci.website||'\u2014')}</div></div>
         <div><div class="k">Confidence</div><div class="v">${esc(p.confidence_score||'\u2014')}</div></div>
+        <div><div class="k">Emails</div><div class="v">${discoveredEmails.length?esc(discoveredEmails.join(', ')):'—'}</div></div>
+        <div><div class="k">Outreach</div><div class="v">${esc(sendStatus)}</div></div>
       </div>${cs.cold_outreach_message?`<div class="lead-msg"><strong>Outreach:</strong> ${esc(cs.cold_outreach_message)}</div>`:''}
+      ${contactDiscovery.search_response?`<div class="lead-msg"><strong>Contact Discovery:</strong> ${esc(contactDiscovery.search_response)}</div>`:''}
+      ${sentEmails.length?`<div class="lead-msg"><strong>Sent Details:</strong> ${esc(JSON.stringify(sentEmails, null, 2))}</div>`:''}
       ${outreachHtml}
       <div class="lead-actions">
         <button class="btn-outreached${isOutreached?' active':''}" onclick="toggleOutreached(${l.id},this)" ${isOutreached?'disabled':''}>${isOutreached?'\u2713 Outreached':'Mark Outreached'}</button>

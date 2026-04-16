@@ -40,6 +40,7 @@ from db import (
     start_run,
     update_run_progress,
     update_job_ai_status,
+    update_lead_enrichment,
 )
 from notifier import log_lead_to_file, notify_desktop, print_lead
 from outreach_mailer import generate_email_draft, should_skip_job
@@ -138,12 +139,25 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
             send_status="skipped",
             skipped_reason=skip_reason,
         )
+        update_lead_enrichment(
+            lead_db_id,
+            outreach_status="skipped",
+            outreach_result={"send_status": "skipped", "skipped_reason": skip_reason},
+        )
         return
 
     contacts = discover_contacts(page, job, lead_result, logger=log_step)
     raw_search_response = contacts.get("search_response", "")
     candidate_emails = contacts.get("emails", [])
     log_step("outreach", "contact discovery completed", lead_id=lead_db_id, candidate_emails=len(candidate_emails))
+
+    update_lead_enrichment(
+        lead_db_id,
+        job_description=job.get("description", ""),
+        contact_discovery=contacts,
+        discovered_emails=candidate_emails,
+        outreach_status="contact_discovered",
+    )
 
     if not candidate_emails:
         log_step("outreach", "no email candidates found; skipping outreach", lead_id=lead_db_id)
@@ -152,6 +166,11 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
             grok_response=raw_search_response,
             contacts=contacts,
             send_status="no_emails",
+        )
+        update_lead_enrichment(
+            lead_db_id,
+            outreach_status="no_emails",
+            outreach_result={"send_status": "no_emails"},
         )
         return
 
@@ -175,6 +194,14 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
             grok_response=raw_search_response,
             contacts=contacts,
             send_status="draft_failed",
+        )
+        update_lead_enrichment(
+            lead_db_id,
+            outreach_status="draft_failed",
+            outreach_result={"send_status": "draft_failed", "error": email_data.get("error", "")},
+            email_subject=email_data.get("subject", ""),
+            email_body=email_data.get("body", ""),
+            emails_sent_to=[],
         )
         return
 
@@ -208,6 +235,20 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
         email_body=email_html,
         emails_sent_to=send_results,
         send_status=status,
+    )
+
+    update_lead_enrichment(
+        lead_db_id,
+        outreach_status=status,
+        outreach_result={
+            "send_status": status,
+            "sent_count": sent_count,
+            "total_recipients": total,
+        },
+        email_subject=email_data.get("subject", ""),
+        email_body=email_html,
+        emails_sent_to=send_results,
+        outreached=1 if status in {"sent", "partial"} else 0,
     )
 
     log_step("outreach", f"outreach complete: {sent_count}/{total} emails sent", lead_id=lead_db_id, status=status)
@@ -269,9 +310,20 @@ def run_poll_cycle(cycle_number: int):
             leads_found += 1
             log_step("analyze", "lead found", cycle=cycle_number, title=job["title"][:80], confidence=result.get("confidence_score"))
             print_lead(result, job)
-            lead_db_id = save_lead(job["job_url"], job["title"], result)
+            lead_db_id = save_lead(
+                job["job_url"],
+                job["title"],
+                result,
+                job_description=job.get("description", ""),
+            )
             log_lead_to_file(result, job)
             update_job_ai_status(job_db_id, "lead_found", result)
+            update_lead_enrichment(
+                lead_db_id,
+                job_description=job.get("description", ""),
+                outreached=0,
+                outreach_status="pending",
+            )
             update_run_progress(run_id, jobs_found=len(jobs), jobs_new=len(new_jobs), leads_found=leads_found)
 
             if config["enable_notifications"]:
