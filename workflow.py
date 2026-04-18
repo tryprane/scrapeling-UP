@@ -8,13 +8,16 @@ fallback while finding contact details.
 
 from __future__ import annotations
 
+import copy
 import os
 import json
 import signal
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import threading
 
 from colorama import Fore, Style, init as colorama_init
 
@@ -26,6 +29,8 @@ if sys.platform == "win32":
 from analyzer import analyze_job
 from contact_discovery import discover_contacts
 from config import config
+from email_verifier import get_sendable_emails, verify_emails
+from mailtester_browser_verifier import verify_emails_via_browser
 from db import (
     cleanup_old_data,
     complete_run,
@@ -51,6 +56,9 @@ from scrapling_scraper import scrape_all_jobs
 colorama_init()
 
 _dashboard_proc = None
+_outreach_executor: ThreadPoolExecutor | None = None
+_outreach_futures: set = set()
+_outreach_futures_lock = threading.Lock()
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflow.log")
 
 
@@ -125,42 +133,56 @@ def _stop_dashboard():
         _dashboard_proc = None
 
 
-def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
-    """
-    Run outreach for a single lead.
-    """
-    log_step("outreach", "pipeline started", title=job.get("title", ""), lead_id=lead_db_id)
+def _get_outreach_executor() -> ThreadPoolExecutor:
+    """Create the background outreach executor lazily."""
+    global _outreach_executor
+    if _outreach_executor is None:
+        max_workers = max(1, int(config.get("outreach_async_workers", 1)))
+        _outreach_executor = ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="outreach",
+        )
+    return _outreach_executor
 
-    skip, skip_reason = should_skip_job(job)
-    if skip:
-        log_step("outreach", f"skipping outreach: {skip_reason}", lead_id=lead_db_id)
-        save_outreach_result(
-            lead_id=lead_db_id,
-            send_status="skipped",
-            skipped_reason=skip_reason,
-        )
-        update_lead_enrichment(
-            lead_db_id,
-            outreach_status="skipped",
-            outreach_result={"send_status": "skipped", "skipped_reason": skip_reason},
-        )
+
+def _track_outreach_future(future, lead_id: int):
+    """Keep a reference to background work and log failures."""
+    with _outreach_futures_lock:
+        _outreach_futures.add(future)
+
+    def _done(done_future):
+        with _outreach_futures_lock:
+            _outreach_futures.discard(done_future)
+        try:
+            done_future.result()
+        except Exception as exc:
+            log_step("outreach", f"background task failed: {exc}", lead_id=lead_id)
+
+    future.add_done_callback(_done)
+
+
+def shutdown_outreach_executor(wait: bool = True):
+    """Shut down the background outreach executor cleanly."""
+    global _outreach_executor
+    if _outreach_executor is None:
         return
+    try:
+        _outreach_executor.shutdown(wait=wait, cancel_futures=False)
+    except Exception:
+        pass
+    _outreach_executor = None
 
-    contacts = discover_contacts(page, job, lead_result, logger=log_step)
-    raw_search_response = contacts.get("search_response", "")
-    candidate_emails = contacts.get("emails", [])
-    log_step("outreach", "contact discovery completed", lead_id=lead_db_id, candidate_emails=len(candidate_emails))
 
-    update_lead_enrichment(
-        lead_db_id,
-        job_description=job.get("description", ""),
-        contact_discovery=contacts,
-        discovered_emails=candidate_emails,
-        outreach_status="contact_discovered",
-    )
+def _run_outreach_task(job: dict, lead_result: dict, lead_db_id: int, contacts_snapshot: dict):
+    """Run staged verification, draft generation, and sending in the background."""
+    raw_search_response = contacts_snapshot.get("search_response", "") if contacts_snapshot else ""
+    contacts = copy.deepcopy(contacts_snapshot or {})
+    candidate_emails = list(contacts.get("candidate_emails") or contacts.get("emails") or [])
+
+    log_step("outreach", "background outreach task started", lead_id=lead_db_id, candidate_emails=len(candidate_emails))
 
     if not candidate_emails:
-        log_step("outreach", "no email candidates found; skipping outreach", lead_id=lead_db_id)
+        log_step("outreach", "no email candidates available in background task", lead_id=lead_db_id)
         save_outreach_result(
             lead_id=lead_db_id,
             grok_response=raw_search_response,
@@ -171,19 +193,96 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
             lead_db_id,
             outreach_status="no_emails",
             outreach_result={"send_status": "no_emails"},
+            outreached=0,
         )
         return
 
-    contacts["candidate_emails"] = candidate_emails
-    contacts["verified_emails"] = []
-    contacts["sendable_emails"] = candidate_emails
+    log_step("outreach", "verifying email syntax and MX in code", lead_id=lead_db_id)
+    code_verification = verify_emails(candidate_emails)
+    code_verified = get_sendable_emails(
+        code_verification,
+        include_risky=False,
+        include_unknown_business=False,
+    )
+    contacts["local_email_verification"] = {
+        "provider": "local",
+        "result": code_verification,
+    }
+    contacts["code_verified_emails"] = code_verified
 
-    if config.get("skip_email_verification", False):
-        log_step("outreach", "email verification skipped; using discovered emails directly", lead_id=lead_db_id, sendable_emails=candidate_emails)
-    else:
-        log_step("outreach", "email verification disabled only when SKIP_EMAIL_VERIFICATION=true", lead_id=lead_db_id, sendable_emails=candidate_emails)
+    if not code_verified:
+        log_step("outreach", "no emails passed syntax/MX checks", lead_id=lead_db_id)
+        save_outreach_result(
+            lead_id=lead_db_id,
+            grok_response=raw_search_response,
+            contacts=contacts,
+            send_status="no_code_verified",
+        )
+        update_lead_enrichment(
+            lead_db_id,
+            outreach_status="no_code_verified",
+            outreach_result={"send_status": "no_code_verified"},
+            emails_sent_to=[],
+            outreached=0,
+        )
+        return
 
-    contacts["emails"] = candidate_emails
+    log_step("outreach", "verifying code-passed emails in browser", lead_id=lead_db_id, candidate_emails=code_verified)
+    browser_verification = verify_emails_via_browser(
+        None,
+        code_verified,
+        verifier_url=config.get("mailtester_verifier_url", "https://mailtester.ninja/email-verifier/"),
+        page_timeout_ms=config.get("mailtester_verifier_page_timeout_ms", 30000),
+        wait_seconds=config.get("mailtester_verifier_wait_seconds", 90),
+        batch_size=1,
+        headless=config["headless"] or not config.get("mailtester_verifier_visible", True),
+    )
+    browser_verified = get_sendable_emails(
+        browser_verification,
+        include_risky=False,
+        include_unknown_business=False,
+    )
+
+    contacts["verified_emails"] = browser_verification.get("verified", [])
+    contacts["sendable_emails"] = browser_verified
+    contacts["emails"] = browser_verified
+    contacts["email_verification"] = {
+        "provider": "hybrid",
+        "result": {
+            "local": code_verification,
+            "browser": browser_verification,
+        },
+    }
+
+    update_lead_enrichment(
+        lead_db_id,
+        contact_discovery=contacts,
+        discovered_emails=candidate_emails,
+        outreach_status="verification_complete",
+        outreach_result={
+            "send_status": "verification_complete",
+            "code_verified": code_verified,
+            "browser_verified": browser_verified,
+        },
+        outreached=0,
+    )
+
+    if not browser_verified:
+        log_step("outreach", "browser verification returned no sendable emails", lead_id=lead_db_id)
+        save_outreach_result(
+            lead_id=lead_db_id,
+            grok_response=raw_search_response,
+            contacts=contacts,
+            send_status="no_browser_verified",
+        )
+        update_lead_enrichment(
+            lead_db_id,
+            outreach_status="no_browser_verified",
+            outreach_result={"send_status": "no_browser_verified"},
+            emails_sent_to=[],
+            outreached=0,
+        )
+        return
 
     log_step("outreach", "generating email draft", lead_id=lead_db_id)
     email_data = generate_email_draft(job, contacts)
@@ -202,6 +301,7 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
             email_subject=email_data.get("subject", ""),
             email_body=email_data.get("body", ""),
             emails_sent_to=[],
+            outreached=0,
         )
         return
 
@@ -254,6 +354,85 @@ def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
     log_step("outreach", f"outreach complete: {sent_count}/{total} emails sent", lead_id=lead_db_id, status=status)
 
 
+def run_outreach_pipeline(page, job: dict, lead_result: dict, lead_db_id: int):
+    """
+    Discover contacts synchronously, then queue the verification/send work.
+    """
+    log_step("outreach", "pipeline started", title=job.get("title", ""), lead_id=lead_db_id)
+
+    skip, skip_reason = should_skip_job(job)
+    if skip:
+        log_step("outreach", f"skipping outreach: {skip_reason}", lead_id=lead_db_id)
+        save_outreach_result(
+            lead_id=lead_db_id,
+            send_status="skipped",
+            skipped_reason=skip_reason,
+        )
+        update_lead_enrichment(
+            lead_db_id,
+            outreach_status="skipped",
+            outreach_result={"send_status": "skipped", "skipped_reason": skip_reason},
+        )
+        return
+
+    contacts = discover_contacts(page, job, lead_result, logger=log_step)
+    raw_search_response = contacts.get("search_response", "")
+    candidate_emails = contacts.get("emails", [])
+    log_step("outreach", "contact discovery completed", lead_id=lead_db_id, candidate_emails=len(candidate_emails))
+
+    update_lead_enrichment(
+        lead_db_id,
+        job_description=job.get("description", ""),
+        contact_discovery=contacts,
+        discovered_emails=candidate_emails,
+        outreach_status="contact_discovered",
+    )
+
+    if not candidate_emails:
+        log_step("outreach", "no email candidates found; skipping outreach", lead_id=lead_db_id)
+        save_outreach_result(
+            lead_id=lead_db_id,
+            grok_response=raw_search_response,
+            contacts=contacts,
+            send_status="no_emails",
+        )
+        update_lead_enrichment(
+            lead_db_id,
+            outreach_status="no_emails",
+            outreach_result={"send_status": "no_emails"},
+        )
+        return
+
+    contacts["candidate_emails"] = candidate_emails
+    contacts["verified_emails"] = []
+    contacts["sendable_emails"] = []
+    contacts["email_verification"] = {
+        "provider": "queued",
+        "result": {
+            "local": None,
+            "browser": None,
+        },
+    }
+
+    update_lead_enrichment(
+        lead_db_id,
+        contact_discovery=contacts,
+        discovered_emails=candidate_emails,
+        outreach_status="verification_queued",
+        outreached=0,
+    )
+
+    future = _get_outreach_executor().submit(
+        _run_outreach_task,
+        copy.deepcopy(job),
+        copy.deepcopy(lead_result),
+        lead_db_id,
+        copy.deepcopy(contacts),
+    )
+    _track_outreach_future(future, lead_db_id)
+    log_step("outreach", "verification task queued", lead_id=lead_db_id, candidate_emails=len(candidate_emails))
+
+
 def run_poll_cycle(cycle_number: int):
     start_time = time.time()
     now = datetime.now().strftime("%H:%M:%S")
@@ -292,6 +471,17 @@ def run_poll_cycle(cycle_number: int):
         return
 
     leads_found = 0
+    page = None
+    browser_headless = config["headless"]
+    if not browser_headless:
+        log_step("startup", "opening visible browser for scraping")
+    try:
+        page = start_browser(headless=browser_headless)
+    except Exception as e:
+        log_step("scrape", f"browser startup failed: {e}", cycle=cycle_number)
+        fail_run(run_id, str(e))
+        return
+
     for job in new_jobs:
         mark_job_seen(job["job_url"], job["title"])
         job_db_id = save_scraped_job(cycle_number, job)
@@ -329,14 +519,10 @@ def run_poll_cycle(cycle_number: int):
             if config["enable_notifications"]:
                 notify_desktop(result, job["title"])
 
-            page = None
             try:
-                page = start_browser(headless=config["headless"])
                 run_outreach_pipeline(page, job, result, lead_db_id)
             except Exception as oe:
                 log_step("outreach", f"pipeline error: {oe}", cycle=cycle_number, lead_id=lead_db_id)
-            finally:
-                close_browser()
         elif result.get("status") == "NO_LEAD":
             reason = result.get("reason", "")
             reason_str = f" ({reason})" if reason else ""
@@ -352,6 +538,7 @@ def run_poll_cycle(cycle_number: int):
         log_step("throttle", f"waiting {config['ai_call_delay_seconds']} seconds before next AI call", cycle=cycle_number)
         time.sleep(config["ai_call_delay_seconds"])
 
+    close_browser()
     complete_run(run_id, jobs_found=len(jobs), jobs_new=len(new_jobs), leads_found=leads_found)
     elapsed = f"{time.time() - start_time:.1f}"
     stats = get_stats()
@@ -377,12 +564,15 @@ def main():
             log_step("startup", "browser opened in visible mode")
         except Exception as e:
             log_step("startup", f"browser warm-up failed: {e}")
+    elif config.get("email_verifier_provider", "local").lower() == "mailtester_browser" and config.get("mailtester_verifier_visible", True):
+        log_step("startup", "mailtester verifier will open a visible browser when needed")
 
     running = {"value": True}
 
     def handle_signal(sig, frame):
         log_step("shutdown", "shutting down gracefully")
         running["value"] = False
+        shutdown_outreach_executor(wait=True)
         _stop_dashboard()
         close_browser()
         sys.exit(0)
@@ -397,6 +587,7 @@ def main():
             run_poll_cycle(cycle)
         except Exception as e:
             log_step("cycle", f"unhandled cycle error: {e}", cycle=cycle)
+            close_browser()
 
         if not running["value"]:
             break
@@ -411,6 +602,7 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         print(f"{Fore.RED}Fatal error: {e}{Style.RESET_ALL}")
+        shutdown_outreach_executor(wait=True)
         _stop_dashboard()
         close_browser()
         sys.exit(1)

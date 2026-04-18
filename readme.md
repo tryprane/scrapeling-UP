@@ -12,6 +12,7 @@ an upwork job scraper that polls search results, analyzes them with gemini ai, a
 - shows results on a live dashboard at `http://localhost:5050`
 - sends desktop notifications when a lead is found
 - auto-cleans data older than 24 hours from the database
+- keeps email verification staged so browser checks do not block scraping
 
 ---
 
@@ -67,6 +68,10 @@ POLL_INTERVAL_MINUTES=5
 UPWORK_SEARCH_URLS=https://www.upwork.com/nx/search/jobs/?category2_uid=...&sort=recency
 HEADLESS=true
 ENABLE_NOTIFICATIONS=false
+EMAIL_VERIFIER_PROVIDER=mailtester_browser
+MAILTESTER_VERIFIER_VISIBLE=true
+MAILTESTER_VERIFIER_URL=https://mailtester.ninja/email-verifier/
+OUTREACH_ASYNC_WORKERS=1
 ```
 
 > **vps note:** set `HEADLESS=true` and `ENABLE_NOTIFICATIONS=false` on a server — there's no display to show a browser window or desktop notifications.
@@ -179,6 +184,13 @@ by default the dashboard binds to `localhost:5050`. to access it from your brows
 | `UPWORK_SEARCH_URLS` | — | comma-separated upwork search urls |
 | `HEADLESS` | `false` | run browser headless (`true` on vps) |
 | `ENABLE_NOTIFICATIONS` | `true` | desktop toast notifications (`false` on vps) |
+| `OUTREACH_ASYNC_WORKERS` | `1` | background workers for staged verification and sending |
+| `EMAIL_VERIFIER_PROVIDER` | `local` | `local` uses syntax + MX checks, `mailtester_browser` uses the MailTester Ninja browser UI |
+| `MAILTESTER_VERIFIER_VISIBLE` | `true` | open the verifier in a visible browser window first |
+| `MAILTESTER_VERIFIER_URL` | `https://mailtester.ninja/email-verifier/` | MailTester Ninja browser verification page |
+| `MAILTESTER_VERIFIER_PAGE_TIMEOUT_MS` | `30000` | page navigation timeout in milliseconds |
+| `MAILTESTER_VERIFIER_WAIT_SECONDS` | `90` | how long to wait for browser results before falling back |
+| `MAILTESTER_VERIFIER_BATCH_SIZE` | `1` | keep this at `1`; MailTester works best with one email per submission |
 
 ---
 
@@ -188,6 +200,7 @@ by default the dashboard binds to `localhost:5050`. to access it from your brows
 - Upwork scraping now runs through Scrapling instead of the persistent browser profile.
 - gemini api calls are spaced 60 seconds apart to stay within free tier rate limits.
 - the sqlite database (`leads.db`) is created automatically on first run.
+- MailTester Ninja browser verification uses browser automation and should submit one email at a time.
 
 ## VPS note
 

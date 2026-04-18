@@ -1,5 +1,12 @@
 # env & secrets
 .env
+.env.vps
+vps_login_local.py
+credentials.json
+token.json
+lead_master_local.json
+lead_master_local.csv
+lead_master_local.sqlite
 
 # python
 __pycache__/
@@ -33,6 +40,16 @@ debug-screenshots/
 # logs
 *.log
 leads_*.md
+CODEX*.md
+codex_jobs_report.html
+
+# generated exports / reports
+all_leads_structured.*
+lead_export_flat.*
+leads.json
+vps_api_data.json
+vps_leads_structured.*
+scrape.zip
 
 # ide / editors
 .vscode/

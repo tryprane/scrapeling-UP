@@ -27,24 +27,10 @@ GROK_TEXTAREA_SELECTOR = (
     '> div.css-175oi2r.r-1wbh5a2.r-16y2uox > div > textarea'
 )
 
-GROK_SUBMIT_SELECTOR = (
-    '#react-root > div > div > div.css-175oi2r.r-1f2l425.r-13qz1uu.r-417010.r-18u37iz '
-    '> main > div > div > div > div > div > div.r-6koalj.r-eqz5dr.r-1pi2tsx.r-13qz1uu '
-    '> div > div > div.css-175oi2r.r-1pi2tsx.r-11yh6sk.r-1rnoaur.r-bnwqim.r-13qz1uu '
-    '> div > div > div.css-175oi2r.r-1awozwy.r-13qz1uu.r-1sg8ghl > div > div '
-    '> div.css-175oi2r.r-eqz5dr.r-16y2uox.r-1wbh5a2.r-kemksi.r-1kqtdi0.r-nsiyw1'
-    '.r-1phboty.r-rs99b7.r-13awgt0.r-ubezar.r-1wtj0ep.r-xyw6el.r-11f147o.r-1j8xsk'
-    '.r-13qz1uu.r-143luy5 > div > div > div.css-175oi2r.r-1awozwy.r-18u37iz.r-1cmwbt1'
-    '.r-17s6mgv > div > button'
-)
+GROK_SUBMIT_SELECTOR = 'button[aria-label="Grok something"]'
 
-GROK_RESPONSE_SELECTOR = (
-    '#react-root > div > div > div.css-175oi2r.r-1f2l425.r-13qz1uu.r-417010.r-18u37iz '
-    '> main > div > div > div > div > div > div.r-6koalj.r-eqz5dr.r-1pi2tsx.r-13qz1uu '
-    '> div > div > div.css-175oi2r.r-16y2uox > div > div.css-175oi2r.r-13qz1uu '
-    '> div > div > div.css-175oi2r.r-1wbh5a2.r-11niif6.r-bnwqim.r-13qz1uu '
-    '> div.css-175oi2r.r-3pj75a > div > div > span > span > span > span'
-)
+# Targets the response container div — r-3pj75a is stable across UI re-renders
+GROK_RESPONSE_SELECTOR = 'div.r-3pj75a'
 
 # Fallback selectors in case the exact ones break
 TEXTAREA_FALLBACKS = [
@@ -55,6 +41,7 @@ TEXTAREA_FALLBACKS = [
 ]
 
 SUBMIT_FALLBACKS = [
+    'button[aria-label="Grok something"]',
     'button[aria-label="Submit"]',
     'button[aria-label="send"]',
     'button[data-testid="send"]',
@@ -62,10 +49,10 @@ SUBMIT_FALLBACKS = [
 ]
 
 RESPONSE_FALLBACKS = [
+    'div.r-3pj75a',
     'div[data-testid="message-content"]',
-    'main div.r-3pj75a span',
-    'main div[dir="ltr"] span span',
-    'main article span',
+    'main div[dir="ltr"]',
+    'main article',
 ]
 
 
@@ -151,7 +138,7 @@ def _build_grok_prompt(lead_summary: str) -> str:
     )
 
 
-def search_contacts_via_grok(page, lead_summary: str, max_wait_response=120) -> str:
+def search_contacts_via_grok(page, lead_summary: str, max_wait_response=220) -> str:
     """
     Use Grok AI to search for external contact information of a lead.
 
@@ -238,37 +225,37 @@ def search_contacts_via_grok(page, lead_summary: str, max_wait_response=120) -> 
     stable_count = 0
     start_time = time.time()
 
+    # First 100 chars of our prompt — used to skip the user bubble
+    prompt_prefix = prompt[:100].strip()
+
     while time.time() - start_time < max_wait_response:
-        # Try to get the response text
         current_text = ''
 
-        # Try primary selector
+        # Primary: grab LAST div.r-3pj75a — that's always Grok's reply.
+        # (index 0 is the user's prompt bubble; last is the AI response bubble)
         try:
-            resp_elements = page.locator(GROK_RESPONSE_SELECTOR)
-            if resp_elements.count() > 0:
-                texts = []
-                for i in range(resp_elements.count()):
-                    t = resp_elements.nth(i).inner_text().strip()
-                    if t:
-                        texts.append(t)
-                current_text = '\n'.join(texts)
+            els = page.locator(GROK_RESPONSE_SELECTOR)
+            count = els.count()
+            if count >= 1:
+                # The last element is always Grok's response
+                candidate = els.last.inner_text().strip()
+                # Safety: skip if it looks like our own prompt
+                if candidate and not candidate.startswith(prompt_prefix[:60]):
+                    current_text = candidate
         except Exception:
             pass
 
-        # Try fallback selectors if primary failed
+        # Fallback: try other selectors if primary failed
         if not current_text:
-            for sel in RESPONSE_FALLBACKS:
+            for sel in RESPONSE_FALLBACKS[1:]:  # skip div.r-3pj75a (already tried)
                 try:
                     els = page.locator(sel)
-                    if els.count() > 0:
-                        texts = []
-                        for i in range(min(els.count(), 50)):
-                            t = els.nth(i).inner_text().strip()
-                            if t:
-                                texts.append(t)
-                        candidate = '\n'.join(texts)
-                        if len(candidate) > len(current_text):
-                            current_text = candidate
+                    count = els.count()
+                    if count > 0:
+                        candidate = els.last.inner_text().strip()
+                        if candidate and not candidate.startswith(prompt_prefix[:60]):
+                            if len(candidate) > len(current_text):
+                                current_text = candidate
                 except Exception:
                     continue
 

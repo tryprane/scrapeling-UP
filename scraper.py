@@ -10,6 +10,7 @@ import os
 import re
 import time
 import random
+import tempfile
 from pathlib import Path
 from colorama import Fore, Style
 
@@ -17,6 +18,7 @@ from patchright.sync_api import sync_playwright
 
 DEBUG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug-screenshots')
 USER_DATA_DIR = os.path.join(Path.home(), '.cliup-browser-profile-py')
+VISIBLE_USER_DATA_DIR = os.path.join(Path.home(), '.cliup-browser-profile-visible-py')
 
 # Cloudflare Turnstile iframe URL pattern
 _CF_IFRAME_PATTERN = re.compile(r"challenges\.cloudflare\.com/cdn-cgi/challenge-platform/.*")
@@ -33,7 +35,7 @@ def _ensure_dirs():
     os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 
-def start_browser(headless=True):
+def start_browser(headless=False):
     """Launch a persistent Patchright/Chromium browser and return the page."""
     global _playwright, _context, _page
     _ensure_dirs()
@@ -44,17 +46,33 @@ def start_browser(headless=True):
     print(f"{Style.DIM}  🔧 Launching persistent browser (headless={headless})...{Style.RESET_ALL}")
     _playwright = sync_playwright().start()
 
-    _context = _playwright.chromium.launch_persistent_context(
-        user_data_dir=USER_DATA_DIR,
-        headless=headless,
-        channel='chrome',                   # Use installed Chrome
-        viewport={'width': 1366, 'height': 768},
-        args=[
-            '--disable-blink-features=AutomationControlled',
-            '--no-sandbox',
-        ],
-        ignore_default_args=['--enable-automation'],
-    )
+    launch_dirs = [USER_DATA_DIR]
+    if not headless:
+        launch_dirs.append(VISIBLE_USER_DATA_DIR)
+        launch_dirs.append(tempfile.mkdtemp(prefix="cliup-visible-profile-"))
+
+    launch_error = None
+    for user_data_dir in launch_dirs:
+        try:
+            _context = _playwright.chromium.launch_persistent_context(
+                user_data_dir=user_data_dir,
+                headless=headless,
+                channel='chrome',                   # Use installed Chrome
+                viewport={'width': 1366, 'height': 768},
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--no-sandbox',
+                ],
+                ignore_default_args=['--enable-automation'],
+            )
+            break
+        except Exception as exc:
+            launch_error = exc
+            print(f"{Fore.YELLOW}  ⚠ Browser launch failed for {user_data_dir}: {exc}{Style.RESET_ALL}")
+            _context = None
+
+    if _context is None:
+        raise launch_error
 
     _page = _context.pages[0] if _context.pages else _context.new_page()
 
@@ -252,41 +270,55 @@ def _check_login_required(page):
 
 # ── Time parsing ──────────────────────────────────────────────────────
 
-def _is_recent_job(posted_text, max_minutes=15):
+def _parse_posted_age_minutes(posted_text):
     """
-    Check if a job's 'posted_time' text means it was posted within max_minutes.
-    Handles: 'Posted 1 minute ago', 'Posted 3 minutes ago', 'just now', etc.
-    Returns True if recent, False otherwise.
+    Parse a posted-time string into an approximate age in minutes.
+
+    Returns:
+        int minutes, or None if the text cannot be parsed.
     """
     if not posted_text:
-        # If we couldn't extract the time, include the job to be safe
-        return True
+        return None
 
     text = posted_text.lower().strip()
 
-    # "just now", "a few seconds ago", "moments ago", "posted just now"
     if any(kw in text for kw in ['just now', 'seconds ago', 'moment', 'second ago']):
-        return True
+        return 0
 
-    # "Posted 1 minute ago" / "3 minutes ago" / "10 min ago"
     m = re.search(r'(\d+)\s*(?:minute|min)', text)
     if m:
-        minutes = int(m.group(1))
-        is_recent = minutes <= max_minutes
-        if not is_recent:
-            print(f"{Style.DIM}    ⌊ Time filter: '{posted_text}' = {minutes}min > {max_minutes}min{Style.RESET_ALL}")
-        return is_recent
+        return int(m.group(1))
 
-    # "1 hour ago" / "2 hours ago" — too old for 15min window
-    if 'hour' in text:
+    m = re.search(r'(\d+)\s*hour', text)
+    if m:
+        return int(m.group(1)) * 60
+
+    m = re.search(r'(\d+)\s*day', text)
+    if m:
+        return int(m.group(1)) * 60 * 24
+
+    if 'yesterday' in text:
+        return 60 * 24
+    if 'week' in text:
+        return 60 * 24 * 7
+    if 'month' in text:
+        return 60 * 24 * 30
+
+    return None
+
+
+def _is_younger_than_age(posted_text, max_minutes=15):
+    """
+    Return True if a job is younger than max_minutes old.
+    Unknown ages are treated as False so we do not over-collect uncertain jobs.
+    """
+    age = _parse_posted_age_minutes(posted_text)
+    if age is None:
+        print(f"{Style.DIM}    ⌊ Time filter: couldn't parse '{posted_text}', skipping job{Style.RESET_ALL}")
         return False
-
-    # "yesterday", "X days ago", etc. — too old
-    if any(kw in text for kw in ['yesterday', 'day', 'week', 'month']):
+    if age >= max_minutes:
+        print(f"{Style.DIM}    ⌊ Time filter: '{posted_text}' = {age}min >= {max_minutes}min{Style.RESET_ALL}")
         return False
-
-    # If we can't parse it, include it to be safe and log it
-    print(f"{Style.DIM}    ⌊ Time filter: couldn't parse '{posted_text}', including job{Style.RESET_ALL}")
     return True
 
 
@@ -562,14 +594,14 @@ def get_job_summaries(page, jobs):
 
 # ── Main scrape orchestrator ──────────────────────────────────────────
 
-def scrape_all_jobs(search_urls, headless=True, max_minutes=15):
+def scrape_all_jobs(search_urls, headless=False, max_minutes=15):
     """
     Scrape all configured search URLs using a persistent browser session.
 
     Flow:
     1. Open/reuse the persistent browser
     2. Navigate to each search URL, solve Turnstile if needed
-    3. Extract job cards, filter to jobs posted within max_minutes
+    3. Extract job cards, filter to jobs posted younger than max_minutes
     4. Click into each job to get the full summary/description
     5. Deduplicate across URLs
 
@@ -584,20 +616,20 @@ def scrape_all_jobs(search_urls, headless=True, max_minutes=15):
 
         raw_jobs = scrape_search_page(page, url)
 
-        # Filter to recent jobs only
+        # Filter to jobs that are younger than the target age
         recent_jobs = []
         for job in raw_jobs:
             if job['job_url'] in seen_urls:
                 continue
-            if _is_recent_job(job['posted_time'], max_minutes):
+            if _is_younger_than_age(job['posted_time'], max_minutes):
                 recent_jobs.append(job)
                 seen_urls.add(job['job_url'])
             else:
                 print(f"{Style.DIM}  ⌊ Skipped (too old: {job['posted_time']}): {job['title'][:40]}{Style.RESET_ALL}")
 
-        print(f"{Fore.WHITE}  🕐 {len(recent_jobs)} jobs posted within last {max_minutes} min{Style.RESET_ALL}")
+        print(f"{Fore.WHITE}  🕐 {len(recent_jobs)} jobs younger than {max_minutes} min{Style.RESET_ALL}")
 
-        # Click into each recent job to get the summary
+        # Click into each eligible job to get the summary
         if recent_jobs:
             get_job_summaries(page, recent_jobs)
 

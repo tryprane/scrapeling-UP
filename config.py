@@ -29,9 +29,22 @@ config = {
     # runs, or keep false when using a visible browser / virtual display.
     'headless': os.getenv('HEADLESS', 'false').lower() == 'true',
 
-    # When true, outreach uses discovered emails directly instead of requiring
-    # SMTP verification. This is useful when the VPS cannot reach port 25.
-    'skip_email_verification': os.getenv('SKIP_EMAIL_VERIFICATION', 'true').lower() == 'true',
+    # Background outreach workers let contact discovery continue while email
+    # verification and sending happen in parallel.
+    'outreach_async_workers': int(os.getenv('OUTREACH_ASYNC_WORKERS', '1')),
+
+    # Email verifier selection.
+    # local             -> built-in syntax + DNS checks
+    # mailtester_browser -> MailTester Ninja website via browser automation
+    'email_verifier_provider': os.getenv('EMAIL_VERIFIER_PROVIDER', 'local').lower(),
+    'mailtester_verifier_visible': os.getenv('MAILTESTER_VERIFIER_VISIBLE', 'true').lower() != 'false',
+    'mailtester_verifier_url': os.getenv(
+        'MAILTESTER_VERIFIER_URL',
+        'https://mailtester.ninja/email-verifier/',
+    ).rstrip('/'),
+    'mailtester_verifier_wait_seconds': int(os.getenv('MAILTESTER_VERIFIER_WAIT_SECONDS', '90')),
+    'mailtester_verifier_page_timeout_ms': int(os.getenv('MAILTESTER_VERIFIER_PAGE_TIMEOUT_MS', '30000')),
+    'mailtester_verifier_batch_size': int(os.getenv('MAILTESTER_VERIFIER_BATCH_SIZE', '1')),
 
     # Gmail API — address used as the From: header when sending outreach emails.
     # Set this to your Gmail address in .env as GMAIL_SENDER=you@gmail.com
