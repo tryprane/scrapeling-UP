@@ -1,14 +1,14 @@
 # scrapeling-up
 
-an upwork job scraper that polls search results, analyzes them with gemini ai, and alerts you when a good lead shows up. runs a small web dashboard at `localhost:5050` so you can monitor everything without touching the terminal.
+an upwork job scraper that polls search results, analyzes them with a configured llm backend, and alerts you when a good lead shows up. runs a small web dashboard at `localhost:5050` so you can monitor everything without touching the terminal.
 
 ---
 
 ## what it does
 
-- polls upwork search urls every N minutes (configurable)
+- polls upwork search urls every N minutes
 - scrapes job titles, budgets, skills, and full descriptions using Scrapling
-- passes each job to gemini ai for analysis — it decides if it's a real lead or not
+- passes each job to the configured llm backend for analysis
 - shows results on a live dashboard at `http://localhost:5050`
 - sends desktop notifications when a lead is found
 - auto-cleans data older than 24 hours from the database
@@ -16,11 +16,19 @@ an upwork job scraper that polls search results, analyzes them with gemini ai, a
 
 ---
 
+## supported llm modes
+
+- `oauth-codex` on Python 3.11+ with interactive login
+- OpenAI API key or local OpenAI-compatible proxy
+- Groq fallback
+
+---
+
 ## requirements
 
-- python 3.10+
-- google chrome installed (the scraper uses your local chrome via patchright)
-- a gemini api key → [get one here](https://aistudio.google.com)
+- python 3.10+ for the scraper
+- python 3.11+ if you want to use `oauth-codex`
+- google chrome installed
 
 ---
 
@@ -54,29 +62,51 @@ python -m patchright install chromium
 
 ### 5. set up your `.env`
 
-copy the example and fill in your values:
-
 ```bash
 cp .env.example .env
 ```
 
-open `.env` and set:
+open `.env` and choose one provider path:
 
-```
-GEMINI_API_KEY=your_key_here
+```env
+LLM_PROVIDER=auto
+CODEX_OAUTH_ENABLED=true
+CODEX_MODEL=gpt-5.3-codex
+
+OPENAI_API_KEY=local-proxy
+OPENAI_BASE_URL=http://127.0.0.1:10531/v1
+OPENAI_MODEL=gpt-5.1
+OPENAI_ANALYZER_MODEL=gpt-5.1
+
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-20b
+GROQ_ANALYZER_MODEL=llama-3.3-70b-versatile
+
 POLL_INTERVAL_MINUTES=5
 UPWORK_SEARCH_URLS=https://www.upwork.com/nx/search/jobs/?category2_uid=...&sort=recency
 HEADLESS=true
 ENABLE_NOTIFICATIONS=false
-EMAIL_VERIFIER_PROVIDER=mailtester_browser
-MAILTESTER_VERIFIER_VISIBLE=true
-MAILTESTER_VERIFIER_URL=https://mailtester.ninja/email-verifier/
 OUTREACH_ASYNC_WORKERS=1
 ```
 
-> **vps note:** set `HEADLESS=true` and `ENABLE_NOTIFICATIONS=false` on a server — there's no display to show a browser window or desktop notifications.
+---
 
-### 6. run it
+## oauth-codex setup
+
+If you want to use Codex OAuth instead of an API key:
+
+```bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python codex_login.py
+```
+
+That starts the PKCE login flow, prints the authorization URL, and stores the token locally after you finish sign-in.
+
+---
+
+## run it
 
 ```bash
 python3 main.py
@@ -100,110 +130,55 @@ sudo apt install -y python3 python3-pip python3-venv \
     libxrandr2 libgbm1 libasound2
 ```
 
-> these are chromium's runtime dependencies on ubuntu. without them patchright will crash on launch.
-
-### clone, venv, install (same as above)
+### if you want oauth-codex on the vps
 
 ```bash
-git clone https://github.com/tryprane/scrapeling-UP.git
-cd scrapeling-UP
-python3 -m venv venv
+sudo apt install -y python3.11 python3.11-venv
+python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python -m patchright install chromium
+python codex_login.py
 ```
 
-### configure `.env` for headless
-
-```
-HEADLESS=true
-ENABLE_NOTIFICATIONS=false
-```
-
-### keep it running with screen or nohup
-
-using `screen`:
+### keep it running
 
 ```bash
 screen -S upwork
 source venv/bin/activate
 python3 main.py
-# press Ctrl+A then D to detach
 ```
 
-to come back to it:
-
-```bash
-screen -r upwork
-```
-
-using `nohup` (simpler but no live output):
+or:
 
 ```bash
 nohup python3 main.py > bot.log 2>&1 &
-```
-
-check logs:
-
-```bash
 tail -f bot.log
 ```
-
-### access the dashboard from outside the vps
-
-by default the dashboard binds to `localhost:5050`. to access it from your browser, either:
-
-- use an ssh tunnel: `ssh -L 5050:localhost:5050 user@your-vps-ip`
-- or open port 5050 in your vps firewall and change the dashboard host binding to `0.0.0.0`
 
 ---
 
 ## project structure
 
-```
+```text
 .
-├── main.py          # entry point — poll loop
-├── scraper.py       # patchright scraper + cloudflare solver
-├── analyzer.py      # gemini ai analysis
-├── dashboard.py     # flask dashboard server
-├── db.py            # sqlite database helpers
-├── notifier.py      # desktop notifications + file logging
-├── config.py        # loads settings from .env
-├── requirements.txt
-└── .env.example
+├── main.py
+├── scraper.py
+├── analyzer.py
+├── dashboard.py
+├── db.py
+├── notifier.py
+├── config.py
+├── llm_client.py
+├── oauth login helper
+└── requirements.txt
 ```
-
----
-
-## env variables
-
-| variable | default | description |
-|---|---|---|
-| `GEMINI_API_KEY` | — | required. your google gemini api key |
-| `POLL_INTERVAL_MINUTES` | `15` | how often to check for new jobs |
-| `UPWORK_SEARCH_URLS` | — | comma-separated upwork search urls |
-| `HEADLESS` | `false` | run browser headless (`true` on vps) |
-| `ENABLE_NOTIFICATIONS` | `true` | desktop toast notifications (`false` on vps) |
-| `OUTREACH_ASYNC_WORKERS` | `1` | background workers for staged verification and sending |
-| `EMAIL_VERIFIER_PROVIDER` | `local` | `local` uses syntax + MX checks, `mailtester_browser` uses the MailTester Ninja browser UI |
-| `MAILTESTER_VERIFIER_VISIBLE` | `true` | open the verifier in a visible browser window first |
-| `MAILTESTER_VERIFIER_URL` | `https://mailtester.ninja/email-verifier/` | MailTester Ninja browser verification page |
-| `MAILTESTER_VERIFIER_PAGE_TIMEOUT_MS` | `30000` | page navigation timeout in milliseconds |
-| `MAILTESTER_VERIFIER_WAIT_SECONDS` | `90` | how long to wait for browser results before falling back |
-| `MAILTESTER_VERIFIER_BATCH_SIZE` | `1` | keep this at `1`; MailTester works best with one email per submission |
 
 ---
 
 ## notes
 
-- Gemini browser login uses a persistent browser profile stored at `~/.cliup-browser-profile-py`. If Gemini asks you to log in on the first run, do it once and the session is saved.
+  - `oauth-codex` requires Python 3.11+ and an initial interactive login on each new machine.
+- Groq is still available as a fallback.
 - Upwork scraping now runs through Scrapling instead of the persistent browser profile.
-- gemini api calls are spaced 60 seconds apart to stay within free tier rate limits.
 - the sqlite database (`leads.db`) is created automatically on first run.
 - MailTester Ninja browser verification uses browser automation and should submit one email at a time.
-
-## VPS note
-
-- On a Ubuntu VPS, run the workflow inside a virtual display if you want to log into Google/Gemini manually at least once.
-- A common pattern is `xvfb-run -a python3 main.py`.
-- Set `HEADLESS=false` if you want the browser UI/login flow to stay available.

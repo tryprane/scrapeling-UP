@@ -13,7 +13,18 @@ load_dotenv(_env_path)
 # ── Parse config ─────────────────────────────────────────────────────
 
 config = {
-    'gemini_api_key': os.getenv('GEMINI_API_KEY', ''),
+    'llm_provider': os.getenv('LLM_PROVIDER', 'auto').lower(),
+    'codex_oauth_enabled': os.getenv('CODEX_OAUTH_ENABLED', 'false').lower() == 'true',
+    'codex_model': os.getenv('CODEX_MODEL', 'gpt-5.3-codex'),
+
+    'openai_api_key': os.getenv('OPENAI_API_KEY', ''),
+    'openai_base_url': os.getenv('OPENAI_BASE_URL', '').rstrip('/'),
+    'openai_model': os.getenv('OPENAI_MODEL', 'gpt-5.1'),
+    'openai_analyzer_model': os.getenv('OPENAI_ANALYZER_MODEL', 'gpt-5.1'),
+
+    'groq_api_key': os.getenv('GROQ_API_KEY', ''),
+    'groq_model': os.getenv('GROQ_MODEL', 'openai/gpt-oss-20b'),
+    'groq_analyzer_model': os.getenv('GROQ_ANALYZER_MODEL', 'llama-3.3-70b-versatile'),
 
     'poll_interval_minutes': int(os.getenv('POLL_INTERVAL_MINUTES', '15')),
     'ai_call_delay_seconds': int(os.getenv('AI_CALL_DELAY_SECONDS', '60')),

@@ -1,5 +1,7 @@
 scrapling[all]
-google-genai
+openai
+oauth-codex; python_version >= "3.11"
+groq
 python-dotenv
 colorama
 plyer

@@ -54,7 +54,7 @@ def _filter_company_websites(urls: list[str]) -> list[str]:
 
 def build_lead_summary(job: dict, lead_result: dict) -> str:
     """Build a compact summary used for contact discovery searches."""
-    ci = lead_result.get("client_info", {}) if lead_result else {}
+    ci = (lead_result.get("client_info") if lead_result else None) or {}
     return (
         f"Job Title: {job.get('title', '')}\n"
         f"Budget: {job.get('budget', 'Not specified')}\n"
@@ -78,7 +78,7 @@ def discover_contacts(page, job: dict, lead_result: dict, logger=None) -> dict:
         logger: Optional log callback with signature logger(stage, message, **fields).
     """
     lead_summary = build_lead_summary(job, lead_result)
-    ci = lead_result.get("client_info", {}) if lead_result else {}
+    ci = (lead_result.get("client_info") if lead_result else None) or {}
 
     def log(stage: str, message: str, **fields):
         if logger:

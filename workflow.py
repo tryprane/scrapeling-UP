@@ -492,7 +492,7 @@ def run_poll_cycle(cycle_number: int):
             update_job_ai_status(job_db_id, "skipped")
             continue
 
-        log_step("analyze", "sending job to Gemini for classification", cycle=cycle_number, title=job["title"][:80])
+        log_step("analyze", "sending job to LLM for classification", cycle=cycle_number, title=job["title"][:80])
         update_job_ai_status(job_db_id, "analyzing")
         result = analyze_job(job)
 
@@ -548,9 +548,15 @@ def run_poll_cycle(cycle_number: int):
 def main():
     print_banner()
 
-    if not config["gemini_api_key"]:
-        print(f"\n{Fore.RED}{Style.BRIGHT}  ✗ ERROR: GEMINI_API_KEY is not set.{Style.RESET_ALL}")
-        print(f"{Fore.RED}  Copy .env.example to .env and add your key from https://aistudio.google.com\n{Style.RESET_ALL}")
+    has_llm = bool(
+        config.get("codex_oauth_enabled")
+        or config.get("openai_base_url")
+        or config.get("openai_api_key")
+        or config.get("groq_api_key")
+    )
+    if not has_llm:
+        print(f"\n{Fore.RED}{Style.BRIGHT}  ✗ ERROR: no LLM provider is configured.{Style.RESET_ALL}")
+        print(f"{Fore.RED}  Set CODEX_OAUTH_ENABLED=true, OPENAI_BASE_URL, OPENAI_API_KEY, or GROQ_API_KEY in .env.\n{Style.RESET_ALL}")
         sys.exit(1)
 
     init_db()
