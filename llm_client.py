@@ -213,13 +213,13 @@ class _CodexCompatClient:
             "stream": True,
             "store": False,
         }
-        if temperature is not None:
-            payload["temperature"] = temperature
         if max_tokens is not None:
             payload["max_output_tokens"] = max_tokens
 
         # The Codex backend rejects several OpenAI-style extras, so we keep the
-        # request narrow and ignore response_format / other compat-only kwargs.
+        # request narrow and ignore temperature, response_format, and other
+        # compat-only kwargs.
+        _ = temperature
         _ = response_format
         _ = kwargs
 
