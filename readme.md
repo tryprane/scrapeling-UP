@@ -146,18 +146,17 @@ python codex_login.py
 
 ### keep it running
 
-```bash
-screen -S upwork
-source venv/bin/activate
-python3 workflow.py
-```
-
-or:
+Use `systemd` on the VPS so the workflow survives logout and reboots.
 
 ```bash
-nohup python3 main.py > bot.log 2>&1 &
-tail -f bot.log
+sudo cp deploy/upworkbot.service /etc/systemd/system/upworkbot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now upworkbot
+sudo systemctl status upworkbot --no-pager
 ```
+
+The workflow starts `dashboard.py` itself, so nginx can keep proxying
+`/upwork/` to `http://127.0.0.1:5050/` once `upworkbot.service` is active.
 
 ---
 

@@ -1,0 +1,18 @@
+[Unit]
+Description=Upwork Lead Hunter Workflow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openclaw-poorvi
+WorkingDirectory=/home/openclaw-poorvi/scrapeling-UP
+ExecStart=/home/openclaw-poorvi/scrapeling-UP/venv/bin/python -u /home/openclaw-poorvi/scrapeling-UP/workflow.py
+Restart=always
+RestartSec=15
+KillMode=control-group
+TimeoutStopSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
