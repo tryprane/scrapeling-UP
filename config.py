@@ -56,6 +56,14 @@ config = {
     'mailtester_verifier_wait_seconds': int(os.getenv('MAILTESTER_VERIFIER_WAIT_SECONDS', '90')),
     'mailtester_verifier_page_timeout_ms': int(os.getenv('MAILTESTER_VERIFIER_PAGE_TIMEOUT_MS', '30000')),
     'mailtester_verifier_batch_size': int(os.getenv('MAILTESTER_VERIFIER_BATCH_SIZE', '1')),
+    'quickemailverification_api_keys': [
+        key.strip() for key in os.getenv(
+            'QUICKEMAILVERIFICATION_API_KEYS',
+            os.getenv('QUICKEMAILVERIFICATION_API_KEY', ''),
+        ).split(',')
+        if key.strip()
+    ],
+    'quickemailverification_timeout_seconds': int(os.getenv('QUICKEMAILVERIFICATION_TIMEOUT_SECONDS', '30')),
 
     # Gmail API — address used as the From: header when sending outreach emails.
     # Set this to your Gmail address in .env as GMAIL_SENDER=you@gmail.com

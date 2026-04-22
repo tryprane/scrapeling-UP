@@ -31,6 +31,7 @@ from contact_discovery import discover_contacts
 from config import config
 from email_verifier import get_sendable_emails, verify_emails
 from mailtester_browser_verifier import verify_emails_via_browser
+from quick_mail_verification import verify_emails_via_api_keys
 from db import (
     cleanup_old_data,
     complete_run,
@@ -197,21 +198,45 @@ def _run_outreach_task(job: dict, lead_result: dict, lead_db_id: int, contacts_s
         )
         return
 
-    log_step("outreach", "verifying email syntax and MX in code", lead_id=lead_db_id)
-    code_verification = verify_emails(candidate_emails)
+    api_keys = config.get("quickemailverification_api_keys", []) or []
+    api_verification = None
+    api_verified: list[str] = []
+    fallback_candidates = list(candidate_emails)
+
+    if api_keys:
+        log_step("outreach", "verifying emails via QuickEmailVerification API", lead_id=lead_db_id, candidate_emails=len(candidate_emails))
+        api_verification = verify_emails_via_api_keys(
+            candidate_emails,
+            api_keys,
+            timeout=config.get("quickemailverification_timeout_seconds", 30),
+        )
+        api_verified = list(api_verification.get("verified", []) or [])
+        fallback_candidates = list(api_verification.get("unverified_due_to_api", []) or [])
+        contacts["quickemailverification"] = api_verification
+
+    log_step("outreach", "verifying fallback emails with syntax and MX in code", lead_id=lead_db_id, candidate_emails=len(fallback_candidates))
+    code_verification = verify_emails(fallback_candidates)
     code_verified = get_sendable_emails(
         code_verification,
         include_risky=False,
         include_unknown_business=False,
     )
+    combined_verified = []
+    seen_verified = set()
+    for email in [*api_verified, *code_verified]:
+        key = email.lower()
+        if key in seen_verified:
+            continue
+        seen_verified.add(key)
+        combined_verified.append(email)
     contacts["local_email_verification"] = {
         "provider": "local",
         "result": code_verification,
     }
     contacts["code_verified_emails"] = code_verified
 
-    if not code_verified:
-        log_step("outreach", "no emails passed syntax/MX checks", lead_id=lead_db_id)
+    if not combined_verified:
+        log_step("outreach", "no emails passed API/local verification", lead_id=lead_db_id)
         save_outreach_result(
             lead_id=lead_db_id,
             grok_response=raw_search_response,
@@ -227,28 +252,44 @@ def _run_outreach_task(job: dict, lead_result: dict, lead_db_id: int, contacts_s
         )
         return
 
-    log_step("outreach", "verifying code-passed emails in browser", lead_id=lead_db_id, candidate_emails=code_verified)
-    browser_verification = verify_emails_via_browser(
-        None,
-        code_verified,
-        verifier_url=config.get("mailtester_verifier_url", "https://mailtester.ninja/email-verifier/"),
-        page_timeout_ms=config.get("mailtester_verifier_page_timeout_ms", 30000),
-        wait_seconds=config.get("mailtester_verifier_wait_seconds", 90),
-        batch_size=1,
-        headless=config["headless"] or not config.get("mailtester_verifier_visible", True),
-    )
-    browser_verified = get_sendable_emails(
-        browser_verification,
-        include_risky=False,
-        include_unknown_business=False,
-    )
+    browser_targets = list(code_verified)
+    if browser_targets:
+        log_step("outreach", "verifying code-passed emails in browser", lead_id=lead_db_id, candidate_emails=browser_targets)
+        browser_verification = verify_emails_via_browser(
+            None,
+            browser_targets,
+            verifier_url=config.get("mailtester_verifier_url", "https://mailtester.ninja/email-verifier/"),
+            page_timeout_ms=config.get("mailtester_verifier_page_timeout_ms", 30000),
+            wait_seconds=config.get("mailtester_verifier_wait_seconds", 90),
+            batch_size=1,
+            headless=config["headless"] or not config.get("mailtester_verifier_visible", True),
+        )
+        browser_verified = get_sendable_emails(
+            browser_verification,
+            include_risky=False,
+            include_unknown_business=False,
+        )
+    else:
+        browser_verification = {"verified": [], "risky": [], "invalid": [], "unknown": [], "details": []}
+        browser_verified = []
 
-    contacts["verified_emails"] = browser_verification.get("verified", [])
-    contacts["sendable_emails"] = browser_verified
-    contacts["emails"] = browser_verified
+    final_sendable: list[str] = []
+    final_seen = set()
+    for email in [*api_verified, *browser_verified]:
+        key = email.lower()
+        if key in final_seen:
+            continue
+        final_seen.add(key)
+        final_sendable.append(email)
+
+    contacts["verified_emails"] = final_sendable
+    contacts["api_verified_emails"] = api_verified
+    contacts["sendable_emails"] = final_sendable
+    contacts["emails"] = final_sendable
     contacts["email_verification"] = {
         "provider": "hybrid",
         "result": {
+            "api": api_verification,
             "local": code_verification,
             "browser": browser_verification,
         },
@@ -261,14 +302,16 @@ def _run_outreach_task(job: dict, lead_result: dict, lead_db_id: int, contacts_s
         outreach_status="verification_complete",
         outreach_result={
             "send_status": "verification_complete",
+            "api_verified": api_verified,
             "code_verified": code_verified,
             "browser_verified": browser_verified,
+            "final_sendable": final_sendable,
         },
         outreached=0,
     )
 
-    if not browser_verified:
-        log_step("outreach", "browser verification returned no sendable emails", lead_id=lead_db_id)
+    if not final_sendable:
+        log_step("outreach", "verification returned no sendable emails", lead_id=lead_db_id)
         save_outreach_result(
             lead_id=lead_db_id,
             grok_response=raw_search_response,

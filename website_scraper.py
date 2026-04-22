@@ -42,10 +42,37 @@ NAV_TIMEOUT = 20_000
 
 def _normalise_url(url: str) -> str:
     """Ensure URL has a scheme."""
-    url = url.strip().rstrip('/')
+    url = url.strip().rstrip('/').strip('.,;)')
     if url and not url.startswith('http'):
         url = 'https://' + url
     return url
+
+
+def normalise_candidate_websites(urls: list[str]) -> list[str]:
+    """Split and clean messy website candidates from model/browser output."""
+    normalised: list[str] = []
+    seen: set[str] = set()
+
+    for raw in urls:
+        if not raw:
+            continue
+        pieces = re.split(r'[\s,;]+', str(raw).strip())
+        for piece in pieces:
+            cleaned = _normalise_url(piece)
+            if not cleaned:
+                continue
+            if "://" not in cleaned:
+                continue
+            parsed = urlparse(cleaned)
+            if not parsed.netloc or "," in parsed.netloc:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalised.append(cleaned)
+
+    return normalised
 
 
 def _extract_emails_from_text(text: str) -> list[str]:
@@ -104,7 +131,7 @@ def scrape_emails_from_websites(page, website_urls: list[str]) -> list[str]:
     all_emails: list[str] = []
     seen: set[str] = set()
 
-    for raw_url in website_urls:
+    for raw_url in normalise_candidate_websites(website_urls):
         url = _normalise_url(raw_url)
         if not url:
             continue
@@ -177,7 +204,7 @@ def extract_website_urls_from_text(text: str) -> list[str]:
             continue
         urls.add(u)
 
-    return list(urls)
+    return normalise_candidate_websites(list(urls))
 
 
 def _is_company_website(url: str) -> bool:

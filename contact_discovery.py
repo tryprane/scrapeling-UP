@@ -16,6 +16,7 @@ from website_scraper import (
     extract_emails_from_text,
     extract_website_urls_from_text,
     is_company_website,
+    normalise_candidate_websites,
     scrape_emails_from_websites,
 )
 
@@ -39,7 +40,7 @@ def _filter_company_websites(urls: list[str]) -> list[str]:
     """Keep only company-like website URLs and preserve order."""
     filtered: list[str] = []
     seen = set()
-    for raw in urls:
+    for raw in normalise_candidate_websites(urls):
         url = (raw or "").strip()
         if not url:
             continue
@@ -108,6 +109,7 @@ def discover_contacts(page, job: dict, lead_result: dict, logger=None) -> dict:
         found_websites = _filter_company_websites(extract_website_urls_from_text(search_response))
         contacts["emails"].extend(found_emails)
         contacts["websites"].extend(found_websites)
+        contacts["summary"] = (search_response[:600] or "").strip()
         log(
             "contact-discovery",
             "Gemini contact search returned candidates",
@@ -118,8 +120,8 @@ def discover_contacts(page, job: dict, lead_result: dict, logger=None) -> dict:
     websites = list(contacts.get("websites", []))
 
     ci_website = (ci.get("website", "") or "").strip()
-    if ci_website and is_company_website(ci_website):
-        websites.append(ci_website)
+    if ci_website:
+        websites.extend(normalise_candidate_websites([ci_website]))
 
     websites = _filter_company_websites(_dedupe_keep_order(websites))
     scraped_emails: list[str] = []

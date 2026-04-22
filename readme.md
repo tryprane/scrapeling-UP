@@ -13,6 +13,7 @@ an upwork job scraper that polls search results, analyzes them with a configured
 - sends desktop notifications when a lead is found
 - auto-cleans data older than 24 hours from the database
 - keeps email verification staged so browser checks do not block scraping
+- verifies emails with QuickEmailVerification first, then falls back to local MX checks and browser verification when the API path is unavailable
 
 ---
 
@@ -87,6 +88,7 @@ UPWORK_SEARCH_URLS=https://www.upwork.com/nx/search/jobs/?category2_uid=...&sort
 HEADLESS=true
 ENABLE_NOTIFICATIONS=false
 OUTREACH_ASYNC_WORKERS=1
+QUICKEMAILVERIFICATION_API_KEYS=key_one,key_two
 ```
 
 ---
@@ -113,6 +115,8 @@ python3 main.py
 ```
 
 the dashboard starts automatically at `http://localhost:5050`.
+
+`main.py` is only a thin wrapper around `workflow.py`, so starting either entrypoint runs the same workflow.
 
 ---
 
@@ -145,7 +149,7 @@ python codex_login.py
 ```bash
 screen -S upwork
 source venv/bin/activate
-python3 main.py
+python3 workflow.py
 ```
 
 or:
@@ -182,3 +186,4 @@ tail -f bot.log
 - Upwork scraping now runs through Scrapling instead of the persistent browser profile.
 - the sqlite database (`leads.db`) is created automatically on first run.
 - MailTester Ninja browser verification uses browser automation and should submit one email at a time.
+- `QUICKEMAILVERIFICATION_API_KEYS` accepts a comma-separated list. The workflow tries each key in order and only falls back to local/browser verification when the API path fails operationally.
