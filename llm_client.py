@@ -425,17 +425,35 @@ class _AgentRouterCompatClient:
         **kwargs: Any,
     ) -> _ChatCompletionResponse:
         prompt, system, history = _messages_to_agentrouter_payload(messages)
+        agentrouter_messages: list[dict[str, Any]] = []
+        if system:
+            agentrouter_messages.append({"role": "system", "content": system})
+        agentrouter_messages.extend(history)
+        agentrouter_messages.append({"role": "user", "content": prompt})
+
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": agentrouter_messages,
+            "stream": False,
+        }
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
         _ = response_format
         _ = kwargs
-        text = self._sdk_client.ask(
-            prompt,
-            model=model,
-            system=system,
-            history=history,
-            temperature=temperature if temperature is not None else 0.0,
-            max_tokens=max_tokens if max_tokens is not None else 1024,
-        )
-        content = str(text or "").strip()
+
+        payload = self._sdk_client._transport.request("POST", "/chat/completions", json_body=body)
+
+        content = ""
+        if isinstance(payload, dict):
+            choices = payload.get("choices") or []
+            if choices:
+                first = choices[0] or {}
+                message = first.get("message") or {}
+                content = str(message.get("content") or first.get("text") or "").strip()
+            if not content:
+                content = str(payload.get("output_text") or "").strip()
         if not content:
             raise RuntimeError("AgentRouter returned empty response text.")
         return _ChatCompletionResponse(content)

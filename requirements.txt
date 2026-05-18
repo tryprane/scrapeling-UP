@@ -2,7 +2,7 @@ scrapling[all]
 openai
 oauth-codex; python_version >= "3.11"
 groq
-agentrouter; python_version >= "3.11"
+agentrouter @ git+https://github.com/tryprane/agentrouter-python.git ; python_version >= "3.11"
 python-dotenv
 colorama
 plyer
