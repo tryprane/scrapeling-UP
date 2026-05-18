@@ -32,7 +32,12 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from config import config
-from llm_client import get_client, get_model_name
+from llm_client import (
+    describe_exception,
+    get_client,
+    get_model_name,
+    parse_json_response_text,
+)
 
 _gmail_service = None
 
@@ -196,41 +201,52 @@ COMPANY/PERSON: {contacts.get('summary', 'Unknown')}
 
 Respond with ONLY the JSON as instructed."""
 
-    try:
-        response = client.chat.completions.create(
-            model=get_model_name("draft"),
-            messages=[
-                {"role": "system", "content": EMAIL_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.4,
-            max_tokens=768,
-            response_format={"type": "json_object"},
-        )
+    last_error = None
 
-        text = (response.choices[0].message.content or "").strip()
-        parsed = json.loads(text)
+    for attempt in range(2):
+        try:
+            user_prompt = prompt
+            if attempt == 1:
+                user_prompt += "\n\nIMPORTANT: Return only a raw JSON object with subject and body. Do not include prose, markdown, or code fences."
 
-        result = {
-            "subject": parsed.get("subject", ""),
-            "body": parsed.get("body", ""),
-            "to_emails": emails,
-            "error": "",
-        }
+            response = client.chat.completions.create(
+                model=get_model_name("draft"),
+                messages=[
+                    {"role": "system", "content": EMAIL_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.4,
+                max_tokens=768,
+                response_format={"type": "json_object"},
+            )
 
-        print(f"{Fore.GREEN}  + Email draft generated: \"{result['subject']}\"{Style.RESET_ALL}")
-        print(f"{Style.DIM}    To: {', '.join(emails)}{Style.RESET_ALL}")
+            text = (response.choices[0].message.content or "").strip()
+            parsed = parse_json_response_text(text)
 
-        return result
+            result = {
+                "subject": str(parsed.get("subject", "")).strip(),
+                "body": str(parsed.get("body", "")).strip(),
+                "to_emails": emails,
+                "error": "",
+            }
 
-    except Exception as e:
-        print(f"{Fore.RED}  - Email draft generation error: {e}{Style.RESET_ALL}")
-        return {
-            "subject": "",
-            "body": "",
-            "to_emails": emails,
-            "error": str(e),
-        }
+            if not result["subject"] or not result["body"]:
+                raise ValueError("Model response was missing subject or body.")
+
+            print(f"{Fore.GREEN}  + Email draft generated: \"{result['subject']}\"{Style.RESET_ALL}")
+            print(f"{Style.DIM}    To: {', '.join(emails)}{Style.RESET_ALL}")
+
+            return result
+        except Exception as exc:
+            last_error = describe_exception(exc)
+
+    print(f"{Fore.RED}  - Email draft generation error: {last_error}{Style.RESET_ALL}")
+    return {
+        "subject": "",
+        "body": "",
+        "to_emails": emails,
+        "error": last_error,
+    }
 
 
 def send_via_gmail(email_data: dict, sender_email: str = None) -> list:

@@ -10,7 +10,13 @@ import json
 
 from colorama import Fore, Style
 
-from llm_client import get_client, get_model_name, get_provider
+from llm_client import (
+    describe_exception,
+    get_client,
+    get_model_name,
+    get_provider,
+    parse_json_response_text,
+)
 
 SYSTEM_PROMPT = """You are Lead Hunter AI for Femur Studio.
 Decide whether an Upwork post contains a real externally reachable lead.
@@ -95,42 +101,50 @@ def analyze_job(job: dict) -> dict:
     model_name = get_model_name("analyzer")
     provider = get_provider()
 
-    try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
-            max_tokens=512,
-            response_format={"type": "json_object"},
-        )
+    last_error = None
 
-        if provider == "codex_oauth":
-            text = response.choices[0].message.content or "{}"
-        else:
-            text = (response.choices[0].message.content or "").strip()
-        parsed = json.loads(text)
-        return _normalize_result(parsed)
+    for attempt in range(2):
+        try:
+            user_prompt = prompt
+            if attempt == 1:
+                user_prompt += "\n\nIMPORTANT: Return only a raw JSON object. Do not include prose, markdown, or code fences."
 
-    except Exception as exc:
-        title_preview = job.get("title", "")[:40]
-        print(f"{Fore.YELLOW}  [!] Analyzer error for \"{title_preview}...\": {exc}{Style.RESET_ALL}")
-        return {
-            "status": "ERROR",
-            "error": str(exc),
-            "confidence_score": None,
-            "client_info": {
-                "company_name": "",
-                "guessed_person": "",
-                "website": "",
-                "search_query_used": "",
-            },
-            "contact_strategy": {
-                "email_subject": "",
-                "cold_outreach_message": "",
-            },
-            "evidence": [],
-            "reason": str(exc),
-        }
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+                max_tokens=512,
+                response_format={"type": "json_object"},
+            )
+
+            if provider == "codex_oauth":
+                text = response.choices[0].message.content or "{}"
+            else:
+                text = (response.choices[0].message.content or "").strip()
+            parsed = parse_json_response_text(text)
+            return _normalize_result(parsed)
+        except Exception as exc:
+            last_error = describe_exception(exc)
+
+    title_preview = job.get("title", "")[:40]
+    print(f"{Fore.YELLOW}  [!] Analyzer error for \"{title_preview}...\": {last_error}{Style.RESET_ALL}")
+    return {
+        "status": "ERROR",
+        "error": last_error,
+        "confidence_score": None,
+        "client_info": {
+            "company_name": "",
+            "guessed_person": "",
+            "website": "",
+            "search_query_used": "",
+        },
+        "contact_strategy": {
+            "email_subject": "",
+            "cold_outreach_message": "",
+        },
+        "evidence": [],
+        "reason": last_error,
+    }

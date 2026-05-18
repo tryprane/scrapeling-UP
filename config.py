@@ -14,6 +14,8 @@ load_dotenv(_env_path)
 
 config = {
     'llm_provider': os.getenv('LLM_PROVIDER', 'auto').lower(),
+    'llm_fallback_provider': os.getenv('LLM_FALLBACK_PROVIDER', '').lower(),
+    'llm_fallback_on_errors': os.getenv('LLM_FALLBACK_ON_ERRORS', 'true').lower() != 'false',
     'codex_oauth_enabled': os.getenv('CODEX_OAUTH_ENABLED', 'false').lower() == 'true',
     'codex_model': os.getenv('CODEX_MODEL', 'gpt-5.3-codex'),
 
@@ -25,6 +27,11 @@ config = {
     'groq_api_key': os.getenv('GROQ_API_KEY', ''),
     'groq_model': os.getenv('GROQ_MODEL', 'openai/gpt-oss-20b'),
     'groq_analyzer_model': os.getenv('GROQ_ANALYZER_MODEL', 'llama-3.3-70b-versatile'),
+
+    'agentrouter_api_key': os.getenv('AGENTROUTER_API_KEY', ''),
+    'agentrouter_base_url': os.getenv('AGENTROUTER_BASE_URL', 'https://agentrouter.org/v1').rstrip('/'),
+    'agentrouter_model': os.getenv('AGENTROUTER_MODEL', 'deepseek-v4-flash'),
+    'agentrouter_analyzer_model': os.getenv('AGENTROUTER_ANALYZER_MODEL', 'deepseek-v4-flash'),
 
     'poll_interval_minutes': int(os.getenv('POLL_INTERVAL_MINUTES', '15')),
     'ai_call_delay_seconds': int(os.getenv('AI_CALL_DELAY_SECONDS', '60')),

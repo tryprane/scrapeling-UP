@@ -21,7 +21,9 @@ an upwork job scraper that polls search results, analyzes them with a configured
 
 - `oauth-codex` on Python 3.11+ with interactive login
 - OpenAI API key or local OpenAI-compatible proxy
-- Groq fallback
+- Groq
+- AgentRouter / DeepSeek
+- automatic fallback from Codex/OpenAI to AgentRouter when quota, rate limit, auth, or transient server errors hit
 
 ---
 
@@ -79,6 +81,14 @@ OPENAI_BASE_URL=http://127.0.0.1:10531/v1
 OPENAI_MODEL=gpt-5.1
 OPENAI_ANALYZER_MODEL=gpt-5.1
 
+LLM_FALLBACK_PROVIDER=agentrouter
+LLM_FALLBACK_ON_ERRORS=true
+
+AGENTROUTER_API_KEY=sk-...
+AGENTROUTER_BASE_URL=https://agentrouter.org/v1
+AGENTROUTER_MODEL=deepseek-v4-flash
+AGENTROUTER_ANALYZER_MODEL=deepseek-v4-flash
+
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-20b
 GROQ_ANALYZER_MODEL=llama-3.3-70b-versatile
@@ -105,6 +115,29 @@ python codex_login.py
 ```
 
 That starts the PKCE login flow, prints the authorization URL, and stores the token locally after you finish sign-in.
+
+---
+
+## agentrouter fallback
+
+If you want Codex or OpenAI as the primary provider but need an automatic backup
+when quota or auth problems hit, set:
+
+```env
+LLM_PROVIDER=codex_oauth
+CODEX_OAUTH_ENABLED=true
+CODEX_MODEL=gpt-5.3-codex
+
+LLM_FALLBACK_PROVIDER=agentrouter
+LLM_FALLBACK_ON_ERRORS=true
+AGENTROUTER_API_KEY=sk-...
+AGENTROUTER_MODEL=deepseek-v4-flash
+AGENTROUTER_ANALYZER_MODEL=deepseek-v4-flash
+```
+
+The shared client will keep using Codex by default and retry the same request on
+AgentRouter / DeepSeek when it hits rate limits, exhausted quota, auth errors,
+or transient 5xx / timeout failures.
 
 ---
 

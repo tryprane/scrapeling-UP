@@ -1,12 +1,24 @@
 # env & secrets
 .env
 .env.vps
+.env.local
+.env.*.local
 vps_login_local.py
 credentials.json
 token.json
 lead_master_local.json
 lead_master_local.csv
 lead_master_local.sqlite
+*.pem
+*.key
+*.p12
+*.crt
+*.cer
+id_rsa
+id_ed25519
+vps*login*.md
+*vps*login*.md
+ssh*.md
 
 # python
 __pycache__/

@@ -42,7 +42,15 @@ NAV_TIMEOUT = 20_000
 
 def _normalise_url(url: str) -> str:
     """Ensure URL has a scheme."""
-    url = url.strip().rstrip('/').strip('.,;)')
+    url = (url or "").strip()
+    markdown_match = re.search(r"\((https?://[^)\s]+)\)", url)
+    if markdown_match:
+        url = markdown_match.group(1)
+    elif "](" in url:
+        url = url.split("](", 1)[-1]
+    url = url.strip().strip("[](){}<>")
+    url = re.sub(r"[\]\[<>{}]+", "", url)
+    url = url.rstrip('/').strip('.,;)')
     if url and not url.startswith('http'):
         url = 'https://' + url
     return url

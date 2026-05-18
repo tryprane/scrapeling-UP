@@ -4,13 +4,15 @@ Shared LLM client factory.
 Supports:
 - Codex OAuth PKCE with a direct backend compatibility layer
 - OpenAI API / OpenAI-compatible local proxy
-- Groq fallback
+- Groq
+- AgentRouter / DeepSeek
+- automatic fallback when the primary provider hits quota, auth, rate, or
+  transient server issues
 """
 
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -19,8 +21,55 @@ from config import config
 
 _CLIENT: Any = None
 _PROVIDER: str = ""
+_FALLBACK_PROVIDER: str = ""
 
 _CODEX_BACKEND_BASE_URL = "https://chatgpt.com/backend-api/codex"
+
+
+def describe_exception(exc: Exception) -> str:
+    """Return a readable exception string even when str(exc) is empty."""
+    message = str(exc).strip()
+    if message:
+        return message
+    return exc.__class__.__name__
+
+
+def parse_json_response_text(text: str) -> Any:
+    """
+    Parse a model response that should contain JSON.
+
+    Handles common model drift such as code fences, leading prose, or trailing
+    notes after a valid JSON object/array.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        raise ValueError("Model returned an empty response.")
+
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        raw = "\n".join(lines).strip()
+
+    decoder = json.JSONDecoder()
+    try:
+        return decoder.decode(raw)
+    except json.JSONDecodeError:
+        pass
+
+    for marker in ("{", "["):
+        start = raw.find(marker)
+        if start == -1:
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(raw[start:])
+            return parsed
+        except json.JSONDecodeError:
+            continue
+
+    raise ValueError(f"Model did not return valid JSON. First 200 chars: {raw[:200]!r}")
 
 
 def _provider_from_config() -> str:
@@ -37,7 +86,20 @@ def _provider_from_config() -> str:
         return "openai_api"
     if config.get("groq_api_key"):
         return "groq"
+    if config.get("agentrouter_api_key"):
+        return "agentrouter"
     return "none"
+
+
+def _fallback_provider_from_config(primary_provider: str) -> str:
+    fallback = (config.get("llm_fallback_provider") or "").lower().strip()
+    if fallback and fallback != primary_provider:
+        return fallback
+
+    if config.get("agentrouter_api_key") and primary_provider != "agentrouter":
+        return "agentrouter"
+
+    return ""
 
 
 def _load_oauth_codex_client():
@@ -80,6 +142,28 @@ def _load_groq_client():
     if not config.get("groq_api_key"):
         raise RuntimeError("GROQ_API_KEY is not set.")
     return Groq(api_key=config["groq_api_key"])
+
+
+def _load_agentrouter_client():
+    """Create an AgentRouter client for DeepSeek fallback/direct usage."""
+    try:
+        from agentrouter import Client
+    except Exception as exc:
+        raise RuntimeError(
+            "agentrouter package is not installed. Install the agentrouter dependency on Python 3.11+."
+        ) from exc
+
+    if not config.get("agentrouter_api_key"):
+        raise RuntimeError("AGENTROUTER_API_KEY is not set.")
+
+    return _AgentRouterCompatClient(
+        Client(
+            api_key=config["agentrouter_api_key"],
+            model=config.get("agentrouter_model", "deepseek-v4-flash"),
+            base_url=config.get("agentrouter_base_url", "https://agentrouter.org/v1"),
+            timeout=60.0,
+        )
+    )
 
 
 def _dedupe_keep_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -131,6 +215,37 @@ def _messages_to_codex_payload(messages: list[dict[str, Any]] | None) -> tuple[s
         input_messages = [{"role": "user", "content": ""}]
 
     return joined_instructions, input_messages
+
+
+def _messages_to_agentrouter_payload(
+    messages: list[dict[str, Any]] | None,
+) -> tuple[str, str | None, list[dict[str, Any]]]:
+    """Convert chat-completions messages into AgentRouter ask(...) args."""
+    system_parts: list[str] = []
+    conversation: list[dict[str, Any]] = []
+
+    for message in messages or []:
+        role = str(message.get("role", "user"))
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        text = str(content).strip()
+        if role == "system":
+            if text:
+                system_parts.append(text)
+            continue
+        conversation.append({"role": role, "content": text})
+
+    if not conversation:
+        conversation = [{"role": "user", "content": ""}]
+
+    prompt = str(conversation[-1].get("content", "")).strip()
+    history = conversation[:-1]
+    system = "\n\n".join(part for part in system_parts if part).strip() or None
+    return prompt, system, history
 
 
 class _ChatCompletionMessage:
@@ -225,6 +340,7 @@ class _CodexCompatClient:
         headers["Content-Type"] = "application/json"
 
         text_parts: list[str] = []
+        final_text = ""
         with httpx.Client(timeout=60.0, headers=headers) as http_client:
             with http_client.stream(
                 "POST",
@@ -244,34 +360,249 @@ class _CodexCompatClient:
                         event = json.loads(line[6:])
                     except json.JSONDecodeError:
                         continue
-                    if event.get("type") == "response.output_text.delta":
+                    event_type = event.get("type")
+                    if event_type == "response.output_text.delta":
                         text_parts.append(event.get("delta", ""))
-                    elif event.get("type") == "response.completed":
+                    elif event_type == "response.output_text.done":
+                        final_text = event.get("text", "") or final_text
+                    elif event_type == "response.content_part.done":
+                        part = event.get("part") or {}
+                        if part.get("type") == "output_text":
+                            final_text = part.get("text", "") or final_text
+                    elif event_type == "response.completed":
                         break
 
-        return _ChatCompletionResponse("".join(text_parts).strip())
+        content = "".join(text_parts).strip() or final_text.strip()
+        if not content:
+            raise RuntimeError("Codex backend returned empty response text.")
+        return _ChatCompletionResponse(content)
+
+
+class _AgentRouterChatCompletions:
+    def __init__(self, outer: "_AgentRouterCompatClient") -> None:
+        self._outer = outer
+
+    def create(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> _ChatCompletionResponse:
+        return self._outer._create_completion(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            **kwargs,
+        )
+
+
+class _AgentRouterChatNamespace:
+    def __init__(self, outer: "_AgentRouterCompatClient") -> None:
+        self.completions = _AgentRouterChatCompletions(outer)
+
+
+class _AgentRouterCompatClient:
+    """OpenAI-style compatibility wrapper for the AgentRouter SDK."""
+
+    def __init__(self, sdk_client: Any) -> None:
+        self._sdk_client = sdk_client
+        self.chat = _AgentRouterChatNamespace(self)
+
+    def _create_completion(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> _ChatCompletionResponse:
+        prompt, system, history = _messages_to_agentrouter_payload(messages)
+        _ = response_format
+        _ = kwargs
+        text = self._sdk_client.ask(
+            prompt,
+            model=model,
+            system=system,
+            history=history,
+            temperature=temperature if temperature is not None else 0.0,
+            max_tokens=max_tokens if max_tokens is not None else 1024,
+        )
+        content = str(text or "").strip()
+        if not content:
+            raise RuntimeError("AgentRouter returned empty response text.")
+        return _ChatCompletionResponse(content)
+
+
+class _FallbackChatCompletions:
+    def __init__(
+        self,
+        primary_client: Any,
+        fallback_client: Any,
+        primary_provider: str,
+        fallback_provider: str,
+    ) -> None:
+        self._primary_client = primary_client
+        self._fallback_client = fallback_client
+        self._primary_provider = primary_provider
+        self._fallback_provider = fallback_provider
+
+    def create(self, **kwargs: Any) -> Any:
+        try:
+            return self._primary_client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if not _should_use_fallback(exc):
+                raise
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs["model"] = _map_model_for_fallback(
+                requested_model=str(kwargs.get("model", "")),
+                primary_provider=self._primary_provider,
+                fallback_provider=self._fallback_provider,
+            )
+            print(
+                f"[llm-fallback] {self._primary_provider} failed: "
+                f"{describe_exception(exc)} -> retrying with {self._fallback_provider}"
+            )
+            return self._fallback_client.chat.completions.create(**fallback_kwargs)
+
+
+class _FallbackChatNamespace:
+    def __init__(
+        self,
+        primary_client: Any,
+        fallback_client: Any,
+        primary_provider: str,
+        fallback_provider: str,
+    ) -> None:
+        self.completions = _FallbackChatCompletions(
+            primary_client,
+            fallback_client,
+            primary_provider,
+            fallback_provider,
+        )
+
+
+class _FallbackCompatClient:
+    """Thin wrapper that retries model calls on a fallback provider."""
+
+    def __init__(
+        self,
+        primary_client: Any,
+        fallback_client: Any,
+        primary_provider: str,
+        fallback_provider: str,
+    ) -> None:
+        self.primary_client = primary_client
+        self.fallback_client = fallback_client
+        self.primary_provider = primary_provider
+        self.fallback_provider = fallback_provider
+        self.chat = _FallbackChatNamespace(
+            primary_client,
+            fallback_client,
+            primary_provider,
+            fallback_provider,
+        )
+
+
+def _should_use_fallback(exc: Exception) -> bool:
+    if not config.get("llm_fallback_on_errors", True):
+        return False
+
+    message = describe_exception(exc).lower()
+    fallback_markers = (
+        "429",
+        "quota",
+        "rate limit",
+        "too many requests",
+        "insufficient_quota",
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "token expired",
+        "status 500",
+        "status 502",
+        "status 503",
+        "status 504",
+        "service unavailable",
+        "connection reset",
+        "timed out",
+        "timeout",
+    )
+    return any(marker in message for marker in fallback_markers)
+
+
+def _model_name_for_provider(provider: str, purpose: str) -> str:
+    if provider == "codex_oauth":
+        return config.get("codex_model", "gpt-5.3-codex")
+    if provider in {"openai_proxy", "openai_api"}:
+        if purpose == "analyzer":
+            return config.get("openai_analyzer_model", "gpt-5.1")
+        return config.get("openai_model", "gpt-5.1")
+    if provider == "groq":
+        if purpose == "analyzer":
+            return config.get("groq_analyzer_model", "llama-3.3-70b-versatile")
+        return config.get("groq_model", "openai/gpt-oss-20b")
+    if provider == "agentrouter":
+        if purpose == "analyzer":
+            return config.get("agentrouter_analyzer_model", "deepseek-v4-flash")
+        return config.get("agentrouter_model", "deepseek-v4-flash")
+    raise RuntimeError(f"Unknown LLM provider: {provider}")
+
+
+def _map_model_for_fallback(
+    *,
+    requested_model: str,
+    primary_provider: str,
+    fallback_provider: str,
+) -> str:
+    primary_analyzer = _model_name_for_provider(primary_provider, "analyzer")
+    primary_draft = _model_name_for_provider(primary_provider, "draft")
+    purpose = "analyzer" if requested_model == primary_analyzer else "draft"
+    return _model_name_for_provider(fallback_provider, purpose)
+
+
+def _create_provider_client(provider: str) -> Any:
+    if provider == "codex_oauth":
+        return _load_oauth_codex_client()
+    if provider in {"openai_proxy", "openai_api"}:
+        return _load_openai_client()
+    if provider == "groq":
+        return _load_groq_client()
+    if provider == "agentrouter":
+        return _load_agentrouter_client()
+    raise RuntimeError(f"Unknown LLM provider: {provider}")
 
 
 def get_client():
     """Return the singleton client and cache the chosen provider."""
-    global _CLIENT, _PROVIDER
+    global _CLIENT, _PROVIDER, _FALLBACK_PROVIDER
     if _CLIENT is not None:
         return _CLIENT
 
     provider = _provider_from_config()
-    if provider == "codex_oauth":
-        _CLIENT = _load_oauth_codex_client()
-    elif provider in {"openai_proxy", "openai_api"}:
-        _CLIENT = _load_openai_client()
-    elif provider == "groq":
-        _CLIENT = _load_groq_client()
-    else:
+    if provider == "none":
         raise RuntimeError(
             "No LLM provider is configured. Set CODEX_OAUTH_ENABLED, "
-            "OPENAI_BASE_URL / OPENAI_API_KEY, or GROQ_API_KEY."
+            "OPENAI_BASE_URL / OPENAI_API_KEY, GROQ_API_KEY, or AGENTROUTER_API_KEY."
         )
 
+    primary_client = _create_provider_client(provider)
+    fallback_provider = _fallback_provider_from_config(provider)
+    if fallback_provider:
+        fallback_client = _create_provider_client(fallback_provider)
+        _CLIENT = _FallbackCompatClient(primary_client, fallback_client, provider, fallback_provider)
+    else:
+        _CLIENT = primary_client
+
     _PROVIDER = provider
+    _FALLBACK_PROVIDER = fallback_provider
     return _CLIENT
 
 
@@ -290,14 +621,4 @@ def get_model_name(purpose: str) -> str:
     purpose: "analyzer" or "draft"
     """
     provider = get_provider()
-    if provider == "codex_oauth":
-        return config.get("codex_model", "gpt-5.3-codex")
-    if provider in {"openai_proxy", "openai_api"}:
-        if purpose == "analyzer":
-            return config.get("openai_analyzer_model", "gpt-5.1")
-        return config.get("openai_model", "gpt-5.1")
-    if provider == "groq":
-        if purpose == "analyzer":
-            return config.get("groq_analyzer_model", "llama-3.3-70b-versatile")
-        return config.get("groq_model", "openai/gpt-oss-20b")
-    raise RuntimeError(f"Unknown LLM provider: {provider}")
+    return _model_name_for_provider(provider, purpose)
